@@ -25,7 +25,7 @@ This project provides a command-line utility to convert Gaussian splat data from
 This project uses `uv` for dependency management. Install dependencies:
 
 ```bash
-uv add typer numpy
+uv add typer numpy plyfile
 ```
 
 ## Usage
@@ -76,3 +76,4 @@ end_header
 - Python >= 3.10
 - numpy >= 2.2.6
 - typer >= 0.15.4
+- plyfile >= 1.1

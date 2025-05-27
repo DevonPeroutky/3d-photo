@@ -1,82 +1,42 @@
 #!/usr/bin/env python3
-import re
-import struct
 import numpy as np
 import typer
 from pathlib import Path
 from typing import Optional
-
-
-def parse_ply_header(file):
-    """Parse PLY header and return property information."""
-    header_lines = []
-    properties = []
-
-    while True:
-        line = file.readline().decode("ascii").strip()
-        header_lines.append(line)
-
-        if line.startswith("property float"):
-            prop_name = line.split()[-1]
-            properties.append(prop_name)
-        elif line == "end_header":
-            break
-
-    return properties, len(header_lines)
+from plyfile import PlyData, PlyElement
 
 
 def read_ply_binary(filepath):
     """Read a binary PLY file containing Gaussian splat data."""
-    with open(filepath, "rb") as file:
-        # Parse header
-        properties, header_lines = parse_ply_header(file)
-        print(
-            f"Parsed header with {len(properties)} properties: {', '.join(properties)}"
-        )
+    plydata = PlyData.read(filepath)
 
-        # Get number of vertices from header
-        file.seek(0)
-        vertex_count = None
+    # Get vertex element
+    vertex_element = plydata["vertex"]
+    vertex_count = len(vertex_element)
 
-        for line in file:
-            line = line.decode("ascii").strip()
-            if line == "end_header":
-                break
-            if match := re.match(r"element vertex (\d+)", line):
-                vertex_count = int(match.group(1))
+    # Get property names
+    properties = [prop.name for prop in vertex_element.properties]
 
-        if vertex_count is None:
-            raise ValueError("Could not find vertex count in PLY header")
+    print(f"Parsed header with {len(properties)} properties: {', '.join(properties)}")
+    print(f"Number of vertices: {vertex_count}")
 
-        print(f"Number of vertices: {vertex_count}")
+    # Convert structured array to regular numpy array
+    vertices = np.array([list(vertex) for vertex in vertex_element.data])
 
-        # Read binary data
-        num_properties = len(properties)
-        vertex_size = num_properties * 4  # 4 bytes per float
-
-        vertices = []
-        for _ in range(vertex_count):
-            vertex_data = struct.unpack(f"<{num_properties}f", file.read(vertex_size))
-            vertices.append(vertex_data)
-
-        return np.array(vertices), properties
+    return vertices, properties
 
 
 def write_splat_text(vertices, properties, output_path):
     """Write Gaussian splat data to text format."""
-    with open(output_path, "w") as file:
-        file.write("ply\n")
-        file.write("format ascii 1.0\n")
-        file.write(f"element vertex {len(vertices)}\n")
+    # Create structured array for plyfile
+    dtype = [(prop, "f4") for prop in properties]
+    vertex_data = np.array([tuple(vertex) for vertex in vertices], dtype=dtype)
 
-        for prop in properties:
-            file.write(f"property float {prop}\n")
-        file.write("end_header\n")
+    # Create PLY element
+    vertex_element = PlyElement.describe(vertex_data, "vertex")
 
-        # Write vertex data
-        for vertex in vertices:
-            formatted_values = [f"{val:.6f}" for val in vertex]
-            file.write(" ".join(formatted_values) + "\n")
+    # Write ASCII PLY file
+    PlyData([vertex_element], text=True).write(output_path)
 
 
 def main(
