@@ -188,11 +188,34 @@ class GaussianSplatReader:
         print(f"Using {len(splat_data)} gaussian splats")
         points, colors = [], []
 
+        # Normalize position around origin
+        average_x_position = np.mean([splat.position.X for splat in splat_data])
+        avg_y_position = np.mean([splat.position.Y for splat in splat_data])
+        avg_z_position = np.mean([splat.position.Z for splat in splat_data])
+
+        splat_data = [
+            GaussianSplat(
+                position=RG.Point3d(
+                    splat.position.X - average_x_position,
+                    splat.position.Y - avg_y_position,
+                    splat.position.Z - avg_z_position,
+                ),
+                scale=splat.scale,
+                rotation_angles=splat.rotation_angles,
+                color=splat.color,
+                opacity=splat.opacity,
+                normal=splat.normal,
+            )
+            for splat in splat_data
+        ]
+
         for splat in splat_data:
             # brep = self.create_splat_object_in_rhino(splat)
             # breps.append(brep)
             # For now, just create a point at the splat position
-            point = RG.Point3d(splat.position.X, splat.position.Y, splat.position.Z)
+            # Apply coordinate system correction - rotate 90 degrees around X-axis and flip Z
+            # Original: (X, Y, Z) -> Rotated: (X, Z, -Y)
+            point = RG.Point3d(splat.position.X, splat.position.Z, -splat.position.Y)
             points.append(point)
 
             r = self.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
