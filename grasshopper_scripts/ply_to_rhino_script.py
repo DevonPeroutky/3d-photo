@@ -2,6 +2,17 @@
 # venv: 3d-photo
 # r: numpy
 # r: plyfile
+import sys
+
+utils_folders = [
+    "/Users/devonperoutky/Development/projects/3d-photo/utils/",
+    "/Users/devonperoutky/Development/projects/3d-photo/utils/custom_types/",
+]
+
+# Add to the folder importable paths if it's not already in there
+for utils_folder in utils_folders:
+    if utils_folder not in sys.path:
+        sys.path.append(utils_folder)
 
 import System
 import Rhino
@@ -12,147 +23,67 @@ import Rhino.Geometry as RG
 
 import System.Drawing as SD
 import plyfile
+import random
 import numpy as np
 import math
 from typing import List, Tuple, Optional
 from numpy.typing import NDArray
 
-
-class GaussianSplat:
-    """Simple data structure to hold Gaussian splat parameters"""
-
-    def __init__(
-        self,
-        position: RG.Point3d,
-        scale: RG.Vector3d,
-        rotation_angles: NDArray[np.float32],
-        color: NDArray[np.float32],
-        opacity: float,
-        normal: Optional[NDArray[np.float32]] = None,
-    ):
-        self.position = position  # Point3d - center position
-        self.scale = scale  # Vector3d - radii in X,Y,Z directions
-        self.rotation_angles = (
-            rotation_angles  # tuple (w, x, y, z) quaternion components
-        )
-        self.color = color  # tuple (R,G,B) 0-255
-        self.opacity = opacity  # float 0.0-1.0
-        self.normal = normal
-
-    def __str__(self):
-        return (
-            f"GaussianSplat(position={self.position}, scale={self.scale}, "
-            f"rotation_angles={self.rotation_angles}, color={self.color}, "
-            f"opacity={self.opacity})"
-        )
+# Import the classes and functions
+from gaussian_splat import GaussianSplat
+from test_data import create_example_splats
 
 
 class GaussianSplatReader:
-    def quaternion_to_transform(self, quat: NDArray[np.float32]) -> RG.Transform:
-        """Convert quaternion (w, x, y, z) to Rhino Transform"""
-        w, x, y, z = quat
+    def create_splat_object_in_rhino(self, splat: GaussianSplat) -> RG.Brep:
+        """Create a Rhino Brep object from a GaussianSplat instance.
+        This method creates an ellipsoid based on the splat parameters.
+        It uses the position, scale, and rotation to define the ellipsoid's geometry.
 
-        # Create Rhino quaternion (expects w, x, y, z order)
-        rhino_quat = RG.Quaternion(w, x, y, z)
-
-        # Use the Transform version of GetRotation with out parameter
-        transform = RG.Transform.Identity
-        rhino_quat.GetRotation(transform)
-        return transform
-
-    def create_splat_ellipsoid(self, splat: GaussianSplat) -> RG.Brep:
-        """Create a NURBS ellipsoid from splat parameters"""
+        Args:
+            splat (GaussianSplat): The GaussianSplat instance containing parameters.
+        Returns:
+            RG.Brep: The resulting Brep object representing the splat.
+        """
         print(splat)
 
-        # Create base ellipsoid at origin
-        base_plane = RG.Plane.WorldXY
-        # ellipsoid = RG.Ellipsoid(base_plane, splat.scale.X, splat.scale.Y, splat.scale.Z)
-        # brep = ellipsoid.ToBrep()
+        # Create a unit sphere at origin
+        sphere = RG.Sphere(RG.Point3d.Origin, 1.0)
 
-        # Create a sphere at origin
-        print(RG.Point3d.Origin)
-        sphere = RG.Sphere(splat.position, 2.0)
-        brep = RG.Brep.CreateFromSphere(sphere)
+        # ----------------------------------------------
+        # 1. Shape - Scale the sphere to create an ellipsoid
+        # ----------------------------------------------
+        # Convert sphere to NurbsSurface for proper non-uniform scaling
+        nurbs_surface = sphere.ToNurbsSurface()
 
-        # Apply scaling first
-        # scale_xf = RG.Transform.Scale(
-        #     base_plane, splat.scale.X, splat.scale.Y, splat.scale.Z
-        # )
+        # Apply scaling transformation to the NURBS surface, as Berp cannot scale anisotropically
+        scale_xf = RG.Transform.Scale(
+            RG.Plane.WorldXY, splat.scale.X, splat.scale.Y, splat.scale.Z
+        )
+        nurbs_surface.Transform(scale_xf)
 
-        # Create transformation matrix
-        # transform = RG.Transform.Identity
-        # transform = transform * scale_xf
+        # ----------------------------------------------
+        # 2. Position - Apply translation to move to splat position
+        # ----------------------------------------------
+        translation = RG.Transform.Translation(RG.Vector3d(splat.position))
+        nurbs_surface.Transform(translation)
 
-        # Apply quaternion rotation
-        # assert len(splat.rotation_angles) == 4, (
-        #     "Rotation angles must be a quaternion (w, x, y, z)"
-        # )
-        # rotation_transform = self.quaternion_to_transform(splat.rotation_angles)
-        # transform = transform * rotation_transform
+        # ----------------------------------------------
+        # 3. TODO: Rotation - Apply rotation to orient the splat
+        # ----------------------------------------------
 
-        # Apply translation
-        # translation = RG.Transform.Translation(RG.Vector3d(splat.position))
-        # transform = transform * translation
+        # ----------------------------------------------
+        # 4. Convert spherical harmonics DC coefficients to RGB [0-255]
+        # ----------------------------------------------
 
-        # Transform the geometry
-        # brep.Transform(transform)
+        # ----------------------------------------------
+        # 5. Convert spherical harmonics DC coefficients to RGB [0-255]
+        # ----------------------------------------------
+
+        # Convert back to Brep
+        brep = nurbs_surface.ToBrep()
 
         return brep
-
-    def create_example_splats(self) -> List[GaussianSplat]:
-        """Create some example Gaussian splats for testing"""
-
-        splats = []
-
-        # Splat 1: Red, centered at origin
-        splats.append(
-            GaussianSplat(
-                position=RG.Point3d(0, 0, 0),
-                scale=RG.Vector3d(2, 1, 1),
-                rotation_angles=(
-                    math.cos(math.pi / 8),
-                    0,
-                    0,
-                    math.sin(math.pi / 8),
-                ),  # 45 degree rotation around Z as quaternion
-                color=(255, 100, 100),
-                opacity=0.7,
-            )
-        )
-
-        # Splat 2: Green, offset position
-        splats.append(
-            GaussianSplat(
-                position=RG.Point3d(5, 0, 2),
-                scale=RG.Vector3d(1, 3, 0.5),
-                rotation_angles=(
-                    math.cos(math.pi / 12),
-                    math.sin(math.pi / 12),
-                    0,
-                    0,
-                ),  # 30 degree rotation around X as quaternion
-                color=(100, 255, 100),
-                opacity=0.8,
-            )
-        )
-
-        # Splat 3: Blue, different orientation
-        splats.append(
-            GaussianSplat(
-                position=RG.Point3d(-3, 4, -1),
-                scale=RG.Vector3d(1.5, 1.5, 2),
-                rotation_angles=(
-                    0.5,
-                    0.5,
-                    0.5,
-                    0.5,
-                ),  # Complex rotation as quaternion (normalized)
-                color=(100, 100, 255),
-                opacity=0.6,
-            )
-        )
-
-        return splats
 
     def load_gaussian_splats(self, file_path: str) -> List[GaussianSplat]:
         """Read the PLY above and return a list of GaussianSplat objects.
@@ -188,82 +119,112 @@ class GaussianSplatReader:
         ply = plyfile.PlyData.read(file_path)
         verts = ply["vertex"].data  # structured numpy array
 
-        return [
-            GaussianSplat(
+        splats = []
+        for v in verts:
+            # FIX 1: Transform scale values from log space to real space
+            # Scale values are stored as logarithms (range: -7 to -0.25)
+            # Real scales are obtained by applying exp() function (range: ~0.02 to 0.35)
+            scale_real = RG.Vector3d(
+                math.exp(float(v["scale_0"])),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
+                math.exp(float(v["scale_1"])),
+                math.exp(float(v["scale_2"]))
+            )
+            
+            # FIX 2: Normalize quaternion rotation values
+            # Quaternions must have unit length (norm = 1.0) for valid rotations
+            # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
+            quat_raw = np.array((v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32)
+            quat_norm = np.linalg.norm(quat_raw)
+            if quat_norm > 0:
+                quat_normalized = quat_raw / quat_norm  # Normalize to unit length
+            else:
+                quat_normalized = quat_raw  # Handle edge case of zero quaternion
+            
+            # FIX 3: Transform opacity from logit space to probability space
+            # Opacity is stored in logit space (unbounded real numbers)
+            # Convert to [0,1] probability using sigmoid function: 1/(1+exp(-x))
+            opacity_logit = float(v["opacity"])
+            opacity_real = 1.0 / (1.0 + math.exp(-opacity_logit))  # Sigmoid transformation
+            
+            splats.append(GaussianSplat(
                 position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
-                scale=RG.Vector3d(
-                    float(v["scale_0"]), float(v["scale_1"]), float(v["scale_2"])
-                ),
-                rotation_angles=np.array(
-                    (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
-                ),
+                scale=scale_real,  # Now using properly transformed scales
+                rotation_angles=quat_normalized,  # Now using normalized quaternions
                 color=np.array(
                     (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
                 ),
-                opacity=float(v["opacity"]),
+                opacity=opacity_real,  # Now using properly transformed opacity
                 normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
-            )
-            for v in verts
-        ]
+            ))
+        
+        return splats
 
     def run(
         self,
         file_path: str,
         scale_factor: float,
         subdivision_level: int,
-        max_splats: int,
+        sample_percentage: float,
     ):
         print("=== RunScript STARTED ===")
 
         # Add your processing logic here
         print(
-            f"Processed with inputs: {file_path}, {scale_factor}, {subdivision_level}, {max_splats}"
+            f"Processed with inputs: {file_path}, {scale_factor}, {subdivision_level}, {sample_percentage}"
         )
 
-        splats: List[GaussianSplat] = self.create_example_splats()
+        splats: List[GaussianSplat] = create_example_splats()
+        splats: List[GaussianSplat] = []
         breps = []
         colors = []
 
-        print(f"Creating {len(splats)} example splats...")
-        for splat in splats:
+        for splat in splats[:100]:
             # Create the ellipsoid geometry
-            brep: RG.Brep = self.create_splat_ellipsoid(splat)
+            brep: RG.Brep = self.create_splat_object_in_rhino(splat)
             breps.append(brep)
 
             # Store color information for Grasshopper to use
             # Convert RGB (0-255) to RGB (0-1) for Grasshopper
             color = SD.Color.FromArgb(splat.color[0], splat.color[1], splat.color[2])
-            color = SD.Color.FromArgb(0, 0, 0)
+            # color = SD.Color.FromArgb(0, 0, 0)
             colors.append(color)
 
-        print(f"Created {len(breps)} splats")
-
         # 1. Read PLY file
-        # splat_data = self.load_gaussian_splats(file_path)
+        splat_data = self.load_gaussian_splats(file_path)
 
-        # print(f"Loaded {len(splat_data)} gaussian splats")
+        print(f"Loaded {len(splat_data)} total gaussian splats")
 
-        # for splat in splat_data:
-        #     print(splat)
-        #     brep = self.create_splat_ellipsoid(splat)
-        #     breps.append(brep)
-        #
-        #     color = SD.Color.FromArgb(
-        #         int(splat.color[0]), int(splat.color[1]), int(splat.color[2])
-        #     )
-        #     colors.append(color)
+        splat_data = random.sample(
+            splat_data, round(len(splat_data) * sample_percentage)
+        )
+        print(f"Using {len(splat_data)} gaussian splats")
 
-        # 2. Parse Gaussian splat parameters
-        # positions, scales, rotations, colors = self._parse_splat_data(splat_data, max_splats)
+        for splat in splat_data[:100]:
+            print(splat)
+            brep = self.create_splat_object_in_rhino(splat)
+            breps.append(brep)
 
-        # 3. Generate SubD spheres
-        # spheres = self._create_subd_spheres(positions, scales, scale_factor, subdivision_level)
+            # FIX 4: Convert spherical harmonics DC coefficients to RGB [0-255]
+            # Spherical harmonics coefficients need sigmoid transformation to convert
+            # from unbounded real values to [0,1] range, then scale to [0,255] for RGB
+            def sh_to_rgb(sh_coeff):
+                # Apply sigmoid activation: 1 / (1 + exp(-sh_coeff))
+                # This converts from spherical harmonics space to probability space [0,1]
+                sigmoid = 1.0 / (1.0 + math.exp(-sh_coeff))
+                # Scale from [0,1] to [0,255] range for RGB color values
+                return int(sigmoid * 255)
 
-        # 4. Prepare metadata
-        # metadata = self._create_metadata(splat_data, len(spheres))
+            r = sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
+            g = sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
+            b = sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
+
+            color = SD.Color.FromArgb(r, g, b)
+            colors.append(color)
 
         # Return geometry and colors for Grasshopper to display
         print("=== RunScript COMPLETED ===")
+        print(f"Total Breps created: {len(breps)}")
+        print(f"Total Colors created: {len(colors)}")
         return breps, colors
 
 
@@ -274,7 +235,7 @@ results = workflow_manager.run(
     file_path=file_path,
     scale_factor=scale_factor,
     subdivision_level=subdivision_level,
-    max_splats=max_splats,
+    sample_percentage=sample_percentage,
 )
 
 breps = results[0]  # Geometry output
