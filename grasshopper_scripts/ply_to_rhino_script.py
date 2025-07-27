@@ -45,8 +45,6 @@ class GaussianSplatReader:
         Returns:
             RG.Brep: The resulting Brep object representing the splat.
         """
-        print(splat)
-
         # Create a unit sphere at origin
         sphere = RG.Sphere(RG.Point3d.Origin, 1.0)
 
@@ -127,36 +125,42 @@ class GaussianSplatReader:
             scale_real = RG.Vector3d(
                 math.exp(float(v["scale_0"])),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
                 math.exp(float(v["scale_1"])),
-                math.exp(float(v["scale_2"]))
+                math.exp(float(v["scale_2"])),
             )
-            
+
             # FIX 2: Normalize quaternion rotation values
             # Quaternions must have unit length (norm = 1.0) for valid rotations
             # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
-            quat_raw = np.array((v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32)
+            quat_raw = np.array(
+                (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
+            )
             quat_norm = np.linalg.norm(quat_raw)
             if quat_norm > 0:
                 quat_normalized = quat_raw / quat_norm  # Normalize to unit length
             else:
                 quat_normalized = quat_raw  # Handle edge case of zero quaternion
-            
+
             # FIX 3: Transform opacity from logit space to probability space
             # Opacity is stored in logit space (unbounded real numbers)
             # Convert to [0,1] probability using sigmoid function: 1/(1+exp(-x))
             opacity_logit = float(v["opacity"])
-            opacity_real = 1.0 / (1.0 + math.exp(-opacity_logit))  # Sigmoid transformation
-            
-            splats.append(GaussianSplat(
-                position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
-                scale=scale_real,  # Now using properly transformed scales
-                rotation_angles=quat_normalized,  # Now using normalized quaternions
-                color=np.array(
-                    (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
-                ),
-                opacity=opacity_real,  # Now using properly transformed opacity
-                normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
-            ))
-        
+            opacity_real = 1.0 / (
+                1.0 + math.exp(-opacity_logit)
+            )  # Sigmoid transformation
+
+            splats.append(
+                GaussianSplat(
+                    position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
+                    scale=scale_real,  # Now using properly transformed scales
+                    rotation_angles=quat_normalized,  # Now using normalized quaternions
+                    color=np.array(
+                        (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
+                    ),
+                    opacity=opacity_real,  # Now using properly transformed opacity
+                    normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
+                )
+            )
+
         return splats
 
     def run(
@@ -173,22 +177,6 @@ class GaussianSplatReader:
             f"Processed with inputs: {file_path}, {scale_factor}, {subdivision_level}, {sample_percentage}"
         )
 
-        splats: List[GaussianSplat] = create_example_splats()
-        splats: List[GaussianSplat] = []
-        breps = []
-        colors = []
-
-        for splat in splats[:100]:
-            # Create the ellipsoid geometry
-            brep: RG.Brep = self.create_splat_object_in_rhino(splat)
-            breps.append(brep)
-
-            # Store color information for Grasshopper to use
-            # Convert RGB (0-255) to RGB (0-1) for Grasshopper
-            color = SD.Color.FromArgb(splat.color[0], splat.color[1], splat.color[2])
-            # color = SD.Color.FromArgb(0, 0, 0)
-            colors.append(color)
-
         # 1. Read PLY file
         splat_data = self.load_gaussian_splats(file_path)
 
@@ -198,34 +186,38 @@ class GaussianSplatReader:
             splat_data, round(len(splat_data) * sample_percentage)
         )
         print(f"Using {len(splat_data)} gaussian splats")
+        points, colors = [], []
 
-        for splat in splat_data[:100]:
-            print(splat)
-            brep = self.create_splat_object_in_rhino(splat)
-            breps.append(brep)
+        for splat in splat_data:
+            # brep = self.create_splat_object_in_rhino(splat)
+            # breps.append(brep)
+            # For now, just create a point at the splat position
+            point = RG.Point3d(splat.position.X, splat.position.Y, splat.position.Z)
+            points.append(point)
 
-            # FIX 4: Convert spherical harmonics DC coefficients to RGB [0-255]
-            # Spherical harmonics coefficients need sigmoid transformation to convert
-            # from unbounded real values to [0,1] range, then scale to [0,255] for RGB
-            def sh_to_rgb(sh_coeff):
-                # Apply sigmoid activation: 1 / (1 + exp(-sh_coeff))
-                # This converts from spherical harmonics space to probability space [0,1]
-                sigmoid = 1.0 / (1.0 + math.exp(-sh_coeff))
-                # Scale from [0,1] to [0,255] range for RGB color values
-                return int(sigmoid * 255)
-
-            r = sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
-            g = sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
-            b = sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
+            r = self.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
+            g = self.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
+            b = self.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
 
             color = SD.Color.FromArgb(r, g, b)
             colors.append(color)
 
         # Return geometry and colors for Grasshopper to display
         print("=== RunScript COMPLETED ===")
-        print(f"Total Breps created: {len(breps)}")
-        print(f"Total Colors created: {len(colors)}")
-        return breps, colors
+        print(f"Total Points created: {len(points)}")
+        return points, colors
+
+    def sh_to_rgb(self, sh_coeff):
+        """
+        Convert spherical harmonics DC coefficients to RGB color values.
+        This function applies a sigmoid transformation to the spherical harmonics
+        from unbounded real values to a [0,1] range, then scales to [0,255]
+        """
+        # Apply sigmoid activation: 1 / (1 + exp(-sh_coeff))
+        # This converts from spherical harmonics space to probability space [0,1]
+        sigmoid = 1.0 / (1.0 + math.exp(-sh_coeff))
+        # Scale from [0,1] to [0,255] range for RGB color values
+        return int(sigmoid * 255)
 
 
 workflow_manager = GaussianSplatReader()
