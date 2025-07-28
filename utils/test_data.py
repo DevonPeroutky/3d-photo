@@ -1,8 +1,7 @@
 from typing import List
 import math
 import Rhino.Geometry as RG
-
-from gaussian_splat import GaussianSplat
+from custom_types.custom_types import GaussianSplat
 
 
 def create_example_splats() -> List[GaussianSplat]:
