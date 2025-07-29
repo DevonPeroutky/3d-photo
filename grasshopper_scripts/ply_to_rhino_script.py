@@ -158,14 +158,12 @@ class GaussianSplatReader:
         self,
         splats: List[GaussianSplat],
         min_variance: float = 0.01,
-        max_brightness: float = 0.9,
     ) -> List[GaussianSplat]:
-        """Filter out near-white or low-variance colors that often represent noise.
+        """Filter out low-variance colors that often represent noise.
 
         Args:
             splats: List of GaussianSplat objects
             min_variance: Minimum color variance threshold
-            max_brightness: Maximum brightness threshold (to filter white points)
         Returns:
             Filtered list of splats
         """
@@ -177,15 +175,44 @@ class GaussianSplatReader:
             # Calculate color variance
             variance = np.var(rgb)
 
-            # Calculate brightness (average of RGB)
-            brightness = np.mean(rgb)
-
-            # Keep splats with sufficient color variance and not too bright
-            if variance >= min_variance and brightness <= max_brightness:
+            # Keep splats with sufficient color variance
+            if variance >= min_variance:
                 filtered.append(splat)
 
         print(
-            f"Color filter: {len(splats)} -> {len(filtered)} splats (removed {len(splats) - len(filtered)})"
+            f"Color variance filter: {len(splats)} -> {len(filtered)} splats (removed {len(splats) - len(filtered)})"
+        )
+        return filtered
+
+    def filter_by_brightness(
+        self,
+        splats: List[GaussianSplat],
+        min_brightness: float = 0.1,
+        max_brightness: float = 0.9,
+    ) -> List[GaussianSplat]:
+        """Filter out overly bright or dark colors that often represent noise.
+
+        Args:
+            splats: List of GaussianSplat objects
+            min_brightness: Minimum brightness threshold (to filter dark points)
+            max_brightness: Maximum brightness threshold (to filter white/bright points)
+        Returns:
+            Filtered list of splats
+        """
+        filtered = []
+        for splat in splats:
+            # Convert spherical harmonics to RGB values [0,1] for analysis
+            rgb = [1.0 / (1.0 + math.exp(-c)) for c in splat.color]
+
+            # Calculate brightness (average of RGB)
+            brightness = np.mean(rgb)
+
+            # Keep splats within brightness range
+            if min_brightness <= brightness <= max_brightness:
+                filtered.append(splat)
+
+        print(
+            f"Brightness filter: {len(splats)} -> {len(filtered)} splats (removed {len(splats) - len(filtered)})"
         )
         return filtered
 
@@ -320,12 +347,16 @@ class GaussianSplatReader:
 
         # Default configuration - start with most effective filters for your use case
         filter_config = {
-            "opacity": {"enabled": True, "min_opacity": 0.2},
-            "distance_centroid": {"enabled": True, "percentile": 97.0},
+            "opacity": {"enabled": False, "min_opacity": 0.05},
+            "distance_centroid": {"enabled": True, "percentile": 95.0},
             "color_variance": {
                 "enabled": False,
-                "min_variance": 0.01,
-                "max_brightness": 0.9,
+                "min_variance": 0.004,
+            },
+            "brightness": {
+                "enabled": True,
+                "min_brightness": 0.03,
+                "max_brightness": 0.80,
             },
             "scale": {
                 "enabled": False,
@@ -333,7 +364,7 @@ class GaussianSplatReader:
                 "max_scale_percentile": 95.0,
             },
             "statistical": {"enabled": False, "k_neighbors": 20, "std_ratio": 2.0},
-            "radius": {"enabled": False, "radius": 0.5, "min_neighbors": 5},
+            "radius": {"enabled": True, "radius": 0.35, "min_neighbors": 5},
             "dbscan": {"enabled": False, "eps": 0.3, "min_samples": 10},
         }
 
@@ -369,6 +400,17 @@ class GaussianSplatReader:
                 },
             )
             print(f"After color variance filter: {len(filtered_splats)} splats")
+
+        if filter_config.get("brightness", {}).get("enabled", False):
+            filtered_splats = self.filter_by_brightness(
+                filtered_splats,
+                **{
+                    k: v
+                    for k, v in filter_config["brightness"].items()
+                    if k != "enabled"
+                },
+            )
+            print(f"After brightness filter: {len(filtered_splats)} splats")
 
         if filter_config.get("scale", {}).get("enabled", False):
             filtered_splats = self.filter_by_scale(
@@ -660,20 +702,12 @@ class GaussianSplatReader:
 
         print(f"Loaded {len(splat_data)} total gaussian splats")
 
+        splat_data = self.apply_filters(splat_data)
+
         # Apply spatial-aware sampling instead of random sampling
         splat_data = self.spatial_sampling(splat_data, sample_percentage)
 
-        # Calculate centroid
-        splat_data_centroid = np.mean(
-            [[splat.position.X, splat.position.Y, splat.position.Z] for splat in splat_data],
-            axis=0,
-        )
-        print(f"Centroid of splat data: {splat_data_centroid}")
-
         print(f"Using {len(splat_data)} gaussian splats after spatial sampling")
-
-        # Apply filtering to remove noise and outliers
-        # splat_data = self.apply_filters(splat_data)
 
         # Normalize position around origin
         average_x_position = np.mean([splat.position.X for splat in splat_data])
@@ -696,7 +730,25 @@ class GaussianSplatReader:
             for splat in splat_data
         ]
 
-        geometries, colors = [], []
+        # Calculate centroid
+        splat_data_centroid = np.mean(
+            [
+                [splat.position.X, splat.position.Y, splat.position.Z]
+                for splat in splat_data
+            ],
+            axis=0,
+        )
+        print(f"Centroid of splat data: {splat_data_centroid}")
+        centroid_point = RG.Point3d(
+            splat_data_centroid[0],
+            splat_data_centroid[1],
+            splat_data_centroid[2],
+        )
+
+        # Create a 3D cube to visualize the centroid
+        centroid_cube = RG.Sphere(centroid_point, 0.5).ToBrep()
+
+        geometries, colors = [centroid_cube], [SD.Color.Red]  # Start with centroid cube
 
         print(f"Using render mode: {render_mode}")
 
@@ -720,12 +772,9 @@ class GaussianSplatReader:
         print("=== RunScript COMPLETED ===")
         geometry_type = "Meshes" if render_mode == "preview" else "Breps"
         print(f"Total {geometry_type} created: {len(geometries)}")
-        print(
-            geometries[0]
-        )  # Print first geometry for debuggingt geometry for debugging
 
         # Return geometries and colors
-        return geometries, colors
+        return [geometries, colors]
 
     def export_for_3d_printing(
         self,
