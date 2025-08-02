@@ -60,11 +60,20 @@ class PerformanceMonitor:
         if not geometries:
             return
 
+        # Return geometry and colors for Grasshopper to display
+        geometry_type = "Breps"
+        if render_mode == "test":
+            geometry_type = "Points"
+        elif render_mode == "preview":
+            geometry_type = "Meshes"
+        else:
+            geometry_type = "Breps"
+
         print(f"\n📊 Geometry Statistics ({render_mode} mode):")
-        print(f"  Total objects: {len(geometries):,}")
+        print(f"  Total {geometry_type}: {len(geometries):,}")
 
         # Count vertices/faces for meshes
-        if render_mode == "preview" and hasattr(geometries[0], "Vertices"):
+        if geometry_type == "Meshes" and hasattr(geometries[0], "Vertices"):
             try:
                 total_vertices = sum(
                     g.Vertices.Count for g in geometries if hasattr(g, "Vertices")
@@ -85,4 +94,3 @@ class PerformanceMonitor:
         # Estimate memory usage
         estimated_mb = len(geometries) * 0.1  # Rough estimate
         print(f"  Estimated geometry memory: ~{estimated_mb:.1f} MB")
-
