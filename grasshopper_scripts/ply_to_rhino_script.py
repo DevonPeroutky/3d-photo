@@ -18,9 +18,7 @@ import System
 import Rhino
 import Grasshopper
 import rhinoscriptsyntax as rs
-
 import Rhino.Geometry as RG
-
 import System.Drawing as SD
 import plyfile
 import random
@@ -529,6 +527,17 @@ class GaussianSplatReader:
 
         # Apply all transformations using shared helper method
         scale_x, scale_y, scale_z = splat.scale.X, splat.scale.Y, splat.scale.Z
+
+        # DEBUG: Print scale values to diagnose distortion
+        if abs(scale_x) > 10 or abs(scale_y) > 10 or abs(scale_z) > 10:
+            print(
+                f"EXTREME SCALE VALUES: X={scale_x:.6f}, Y={scale_y:.6f}, Z={scale_z:.6f}"
+            )
+        elif scale_x < 0.001 or scale_y < 0.001 or scale_z < 0.001:
+            print(
+                f"TINY SCALE VALUES: X={scale_x:.6f}, Y={scale_y:.6f}, Z={scale_z:.6f}"
+            )
+
         self._apply_splat_transformations(mesh, scale_x, scale_y, scale_z, splat)
 
         return mesh
@@ -636,15 +645,22 @@ class GaussianSplatReader:
         verts = ply["vertex"].data  # structured numpy array
 
         splats = []
+        scale_values_log = []  # Track original log values
+        scale_values_real = []  # Track real (exp) values
+
         for v in verts:
             # FIX 1: Transform scale values from log space to real space
             # Scale values are stored as logarithms (range: -7 to -0.25)
             # Real scales are obtained by applying exp() function (range: ~0.02 to 0.35)
+            scale_log = [float(v["scale_0"]), float(v["scale_1"]), float(v["scale_2"])]
+            scale_values_log.extend(scale_log)
+
             scale_real = RG.Vector3d(
-                math.exp(float(v["scale_0"])),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
-                math.exp(float(v["scale_1"])),
-                math.exp(float(v["scale_2"])),
+                math.exp(scale_log[0]),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
+                math.exp(scale_log[1]),
+                math.exp(scale_log[2]),
             )
+            scale_values_real.extend([scale_real.X, scale_real.Y, scale_real.Z])
 
             # FIX 2: Normalize quaternion rotation values
             # Quaternions must have unit length (norm = 1.0) for valid rotations
@@ -678,6 +694,25 @@ class GaussianSplatReader:
                     normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
                 )
             )
+
+        # DEBUG: Print scale value statistics
+        scale_log_array = np.array(scale_values_log)
+        scale_real_array = np.array(scale_values_real)
+
+        print(f"\n=== SCALE VALUE ANALYSIS ===")
+        print(
+            f"Log space (original) - Min: {np.min(scale_log_array):.3f}, Max: {np.max(scale_log_array):.3f}, Mean: {np.mean(scale_log_array):.3f}"
+        )
+        print(
+            f"Real space (exp) - Min: {np.min(scale_real_array):.6f}, Max: {np.max(scale_real_array):.6f}, Mean: {np.mean(scale_real_array):.6f}"
+        )
+        print(
+            f"Extreme values (>10): {np.sum(scale_real_array > 10)} out of {len(scale_real_array)}"
+        )
+        print(
+            f"Tiny values (<0.001): {np.sum(scale_real_array < 0.001)} out of {len(scale_real_array)}"
+        )
+        print(f"================================\n")
 
         self.perf_monitor.end_timing()
         return splats
