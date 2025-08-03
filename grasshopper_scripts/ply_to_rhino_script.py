@@ -32,22 +32,6 @@ from performance_monitor import PerformanceMonitor
 from custom_types import GaussianSplat
 from color_utils import ColorUtils
 
-# Auto-reload modules during development
-import importlib
-import performance_monitor
-import custom_types
-import color_utils
-
-# Debug flag - set to False for production
-DEBUG_MODE = True
-
-if DEBUG_MODE:
-    # Force reload of custom modules
-    importlib.reload(performance_monitor)
-    importlib.reload(custom_types)
-    importlib.reload(color_utils)
-    print("DEBUG: Reloaded custom modules")
-
 
 class GaussianSplatReader:
     def __init__(self):
@@ -645,16 +629,6 @@ class GaussianSplatReader:
         # Apply all transformations using shared helper method
         scale_x, scale_y, scale_z = splat.scale.X, splat.scale.Y, splat.scale.Z
 
-        # DEBUG: Print scale values to diagnose distortion
-        # if abs(scale_x) > 10 or abs(scale_y) > 10 or abs(scale_z) > 10:
-        #     print(
-        #         f"EXTREME SCALE VALUES: X={scale_x:.6f}, Y={scale_y:.6f}, Z={scale_z:.6f}"
-        #     )
-        # elif scale_x < 0.001 or scale_y < 0.001 or scale_z < 0.001:
-        #     print(
-        #         f"TINY SCALE VALUES: X={scale_x:.6f}, Y={scale_y:.6f}, Z={scale_z:.6f}"
-        #     )
-
         self._apply_splat_transformations(mesh, scale_x, scale_y, scale_z, splat)
 
         return mesh
@@ -790,16 +764,6 @@ class GaussianSplatReader:
 
         point_cloud = RG.PointCloud()
 
-        # Performance warning for very large datasets
-        if len(splats) > 100000:
-            print(
-                f"⚠️  Large dataset: {len(splats):,} splats. Consider additional filtering for optimal performance."
-            )
-        elif len(splats) > 50000:
-            print(
-                f"📊 Processing {len(splats):,} splats in PointCloud mode for optimal performance."
-            )
-
         for splat in splats:
             # Apply same coordinate transformation as other geometry types
             transformed_pos = RG.Point3d(
@@ -815,25 +779,6 @@ class GaussianSplatReader:
             # Add point with color to the point cloud
             point_cloud.Add(transformed_pos, color)
 
-        # Report performance statistics
-        metrics = self.perf_monitor.end_timing()
-        estimated_individual_time = (
-            len(splats) * 0.001
-        )  # Rough estimate for individual points
-        performance_gain = (
-            estimated_individual_time / metrics["duration"]
-            if metrics["duration"] > 0
-            else 0
-        )
-
-        print(
-            f"✅ PointCloud created: {len(splats):,} points in {metrics['duration']:.2f}s"
-        )
-        if performance_gain > 10:
-            print(
-                f"🚀 Estimated performance gain: {performance_gain:.0f}x faster than individual points"
-            )
-
         return point_cloud
 
     def create_splat_geometry(self, splat: GaussianSplat, render_mode: str = "preview"):
@@ -844,14 +789,12 @@ class GaussianSplatReader:
 
         Args:
             splat (GaussianSplat): The GaussianSplat instance containing parameters.
-            render_mode (str): "preview" for fast mesh, "export" for precise Brep, "test" for points
+            render_mode (str): "preview" for fast mesh, "export" for precise Brep, for points
         Returns:
             RG.Mesh or RG.Brep or RG.Point: The resulting geometry object.
         """
         if render_mode == "preview":
             return self.create_splat_mesh_in_rhino(splat)
-        elif render_mode == "test":
-            return self.create_point_in_rhino(splat)
         elif render_mode == "export":
             return self.create_splat_object_in_rhino(splat)
         else:
@@ -884,6 +827,64 @@ class GaussianSplatReader:
 
         return brep
 
+    def render_splats(
+        self,
+        splats: List[GaussianSplat],
+        render_mode: str = "preview",
+        vector_offset: RG.Vector3d = RG.Vector3d(0, 0, 0),
+    ) -> Tuple[List[RG.GeometryBase], List[SD.Color]]:
+        """Render a list of Gaussian splats in Rhino using the specified render mode.
+
+        Args:
+            splats: List of GaussianSplat objects to render
+            render_mode: "preview" for fast mesh rendering, "export" for precise Brep export,
+                         "test" for point rendering, "pointcloud" for single PointCloud object,
+                         "merged" for single merged Mesh object
+            vector_offset: Optional offset vector to apply to all splat positions
+        Returns:
+            List of RG.GeometryBase objects representing the rendered splats
+        """
+
+        # Apply vector offset to all splat positions
+        transformed_splats = [
+            GaussianSplat(
+                position=splat.position + vector_offset,
+                rotation_angles=splat.rotation_angles,
+                scale=splat.scale,
+                color=splat.color,
+                opacity=splat.opacity,
+            )
+            for splat in splats
+        ]
+
+        if render_mode == "pointcloud":
+            point_cloud = self.create_colored_point_cloud(transformed_splats)
+            return [point_cloud], [SD.Color.White]  # No colors needed for point cloud
+
+        elif render_mode == "merged":
+            merged_mesh = self.create_merged_mesh(transformed_splats)
+            return [merged_mesh], [SD.Color.White]  # No colors needed for merged mesh
+        elif render_mode == "preview":
+            rendered_objects, colors = [], []
+
+            for splat in transformed_splats:
+                geometry = self.create_splat_geometry(splat, render_mode)
+                rendered_objects.append(geometry)
+                r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
+                g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
+                b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
+
+                color = SD.Color.FromArgb(r, g, b)
+                colors.append(color)
+            print(
+                f"Rendered {len(rendered_objects)} transformed_splats in preview mode"
+            )
+            return rendered_objects, colors
+        else:
+            raise ValueError(
+                f"Invalid render_mode: {render_mode}. Use 'preview', 'export', 'test', 'pointcloud', or 'merged'"
+            )
+
     # -----------------------------
     # Workflow Utility Functions
     # -----------------------------
@@ -892,6 +893,23 @@ class GaussianSplatReader:
     ) -> List[GaussianSplat]:
         assert 0 < sample_percentage <= 1, "Sample percentage must be between 0 and 1"
         return random.sample(splats, int(len(splats) * sample_percentage))
+
+    def sample_by_region(
+        self,
+        splats: List[GaussianSplat],
+        region_center: RG.Point3d,
+        radius: float,
+    ) -> List[GaussianSplat]:
+        """Sample splats within a specified radius from a center point."""
+        sampled_splats = [
+            splat
+            for splat in splats
+            if splat.position.DistanceTo(region_center) <= radius
+        ]
+        print(
+            f"Sampled {len(sampled_splats)} splats within radius {radius} from {region_center}"
+        )
+        return sampled_splats
 
     def load_gaussian_splats(self, file_path: str) -> List[GaussianSplat]:
         """Read the PLY above and return a list of GaussianSplat objects.
@@ -1043,7 +1061,11 @@ class GaussianSplatReader:
 
         # Create a 3D cube to visualize the centroid
         centroid_cube = RG.Sphere(centroid_point, 0.25).ToBrep()
-        return centroid_cube, SD.Color.Red  # Return cube and color for visualization
+        return (
+            centroid_point,
+            centroid_cube,
+            SD.Color.Red,
+        )  # Return cube and color for visualization
 
     # -----------------------------
     # External Functions
@@ -1055,7 +1077,7 @@ class GaussianSplatReader:
         subdivision_level: int,
         sample_percentage: float,
         render_mode: str = "preview",
-    ):
+    ) -> Tuple[List[RG.GeometryBase], List[SD.Color]]:
         print("=== RunScript STARTED ===")
 
         # Add your processing logic here
@@ -1067,126 +1089,89 @@ class GaussianSplatReader:
         splat_data = self.load_gaussian_splats(file_path)
 
         # Filter and sample the splat data
-        splat_data = self.simple_sampling(splat_data, sample_percentage)
-        splat_data = self.apply_filters(splat_data)
+        # splat_data = self.simple_sampling(splat_data, sample_percentage)
+        # splat_data = self.apply_filters(splat_data)
         splat_data = self.normalize_splat_position_to_origin(splat_data)
-        centroid_cube, centroid_color = self.visualize_centroid(splat_data)
-        
-        print(f"Using render mode: {render_mode}")
-        
-        # Display render mode information
-        if render_mode == "merged":
-            print("📦 Merged mode: Creating single mesh with vertex colors for optimal performance")
-        elif render_mode == "pointcloud":
-            print("🔴 PointCloud mode: Creating single point cloud for maximum performance")
-        elif render_mode == "preview":
-            print("🔺 Preview mode: Creating individual mesh objects")
-        elif render_mode == "export":
-            print("🏗️  Export mode: Creating individual Brep objects (high quality)")
-        elif render_mode == "test":
-            print("📍 Test mode: Creating individual point objects")
+        centroid_point, centroid_cube, centroid_color = self.visualize_centroid(
+            splat_data
+        )
+        splat_data = self.sample_by_region(splat_data, centroid_point, 2)
 
-        # Performance-aware mode suggestions
-        if len(splat_data) > 10000 and render_mode in ["preview", "test"]:
-            print(
-                f"💡 Performance tip: With {len(splat_data):,} splats, consider using 'merged' or 'pointcloud' mode for faster rendering"
-            )
-        elif len(splat_data) > 5000 and render_mode == "preview":
-            print(
-                f"⚠️  Warning: {len(splat_data):,} individual meshes may cause slow performance. Consider 'merged' or 'pointcloud' mode."
-            )
+        pointcloud_geometries, pointcoud_colors = self.render_splats(
+            splats=splat_data,
+            render_mode="pointcloud",
+            vector_offset=RG.Vector3d(0, 0, 10),
+        )
+        merged_geometries, merged_colors = self.render_splats(
+            splats=splat_data,
+            render_mode="preview",
+            vector_offset=RG.Vector3d(0, 0, 0),
+        )
+        print(f"DEBUG: merged_geometries count: {len(merged_geometries)}")
+        print(
+            f"DEBUG: merged_geometries types: {[type(g).__name__ for g in merged_geometries[:5]]}"
+        )
+        print(
+            f"DEBUG: merged_geometries validity: {[g.IsValid if hasattr(g, 'IsValid') else 'N/A' for g in merged_geometries[:5]]}"
+        )
+
+        geometries = pointcloud_geometries + merged_geometries
+        colors = pointcoud_colors + merged_colors
 
         # Create Rhino geometries based on render mode
-        if render_mode == "pointcloud":
-            # Create single PointCloud object instead of individual geometries
-            point_cloud = self.create_colored_point_cloud(splat_data)
-
-            # For pointcloud mode, return single object with placeholder color
-            # Grasshopper will handle the point cloud's internal colors
-            geometries = [centroid_cube, point_cloud]
-            colors = [
-                centroid_color,
-                SD.Color.White,
-            ]  # Placeholder color for point cloud
-
-        elif render_mode == "merged":
-            # Create single merged mesh containing all splat geometries
-            merged_mesh = self.create_merged_mesh(splat_data)
-
-            # For merged mode, return single mesh object with placeholder color
-            # Vertex colors are embedded in the mesh itself
-            geometries = [centroid_cube, merged_mesh]
-            colors = [
-                centroid_color,
-                SD.Color.White,
-            ]  # Placeholder color for merged mesh
-
-        else:
-            # Standard mode: create individual geometry objects
-            geometries, colors = (
-                [centroid_cube],
-                [centroid_color],
-            )  # Start with centroid cube
-
-            for splat in splat_data:
-                # Create 3D ellipsoid geometry (mesh or brep) for each Gaussian splat
-                geometry = self.create_splat_geometry(splat, render_mode)
-                geometries.append(geometry)
-
-                # Convert spherical harmonics to RGB color
-                r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
-                g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
-                b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
-
-                color = SD.Color.FromArgb(r, g, b)
-                colors.append(color)
-
+        # if render_mode == "pointcloud":
+        #     # Create single PointCloud object instead of individual geometries
+        #     point_cloud = self.create_colored_point_cloud(splat_data)
+        #
+        #     # For pointcloud mode, return single object with placeholder color
+        #     # Grasshopper will handle the point cloud's internal colors
+        #     geometries = [centroid_cube, point_cloud]
+        #     colors = [
+        #         centroid_color,
+        #         SD.Color.White,
+        #     ]  # Placeholder color for point cloud
+        #
+        # elif render_mode == "merged":
+        #     # Create single merged mesh containing all splat geometries
+        #     merged_mesh = self.create_merged_mesh(splat_data)
+        #
+        #     # For merged mode, return single mesh object with placeholder color
+        #     # Vertex colors are embedded in the mesh itself
+        #     geometries = [centroid_cube, merged_mesh]
+        #     colors = [
+        #         centroid_color,
+        #         SD.Color.White,
+        #     ]  # Placeholder color for merged mesh
+        #
+        # else:
+        #     # Standard mode: create individual geometry objects
+        #     geometries, colors = (
+        #         [centroid_cube],
+        #         [centroid_color],
+        #     )  # Start with centroid cube
+        #
+        #     for splat in splat_data:
+        #         # Create 3D ellipsoid geometry (mesh or brep) for each Gaussian splat
+        #         geometry = self.create_splat_geometry(splat, render_mode)
+        #         geometries.append(geometry)
+        #
+        #         # Convert spherical harmonics to RGB color
+        #         r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
+        #         g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
+        #         b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
+        #
+        #         color = SD.Color.FromArgb(r, g, b)
+        #         colors.append(color)
+        #
         # Track final geometry statistics
         self.perf_monitor.track_geometry_stats(geometries, render_mode)
 
         # Return geometries and colors
-        return [geometries, colors]
-
-    def export_for_3d_printing(
-        self,
-        file_path: str,
-        scale_factor: float,
-        subdivision_level: int,
-        sample_percentage: float,
-        output_path: str = None,
-    ):
-        """Generate high-quality Breps for 3D printing and optionally export to STL.
-
-        Args:
-            file_path: Path to PLY file
-            scale_factor: Scaling factor for geometry
-            subdivision_level: Detail level for surfaces
-            sample_percentage: Percentage of splats to include
-            output_path: Optional path to save STL file
-        Returns:
-            List of Brep objects ready for 3D printing
-        """
-        print("=== EXPORT FOR 3D PRINTING STARTED ===")
-        print("Generating high-quality Breps (this may take longer)...")
-
-        # Run with export mode to generate Breps
-        breps, colors = self.run(
-            file_path=file_path,
-            scale_factor=scale_factor,
-            subdivision_level=subdivision_level,
-            sample_percentage=sample_percentage,
-            render_mode="export",
-        )
-
-        print(f"Generated {len(breps)} Breps for 3D printing")
-
-        if output_path:
-            # TODO: Add STL export functionality here
-            # This would require joining meshes, ensuring manifold geometry, etc.
-            print(f"STL export to {output_path} - functionality to be implemented")
-
-        print("=== EXPORT FOR 3D PRINTING COMPLETED ===")
-        return breps
+        print(len(geometries), "geometries created")
+        print(geometries[:3])
+        print(colors[:3])
+        return (geometries, colors)
+        # return ([], [])
 
 
 workflow_manager = GaussianSplatReader()
