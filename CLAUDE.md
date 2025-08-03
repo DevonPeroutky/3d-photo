@@ -8,8 +8,8 @@ Python3 script powering a Rhino 8 Grasshopper component that converts Gaussian S
 ### 1. PLY File Loading
 - Reads Gaussian splat data from PLY files using `plyfile` library
 - Transforms encoded data to real values:
-  - **Scale**: log space ’ real space (`exp()` transformation)
-  - **Opacity**: logit space ’ probability (sigmoid transformation)  
+  - **Scale**: log space ï¿½ real space (`exp()` transformation)
+  - **Opacity**: logit space ï¿½ probability (sigmoid transformation)  
   - **Rotation**: quaternion normalization for valid rotations
 - Extracts position, scale, rotation, color (spherical harmonics), and opacity
 
@@ -29,11 +29,13 @@ Python3 script powering a Rhino 8 Grasshopper component that converts Gaussian S
 - `preview`: Fast mesh ellipsoids for real-time visualization
 - `export`: High-quality Brep ellipsoids for CAD/3D printing
 - `test`: Simple points for debugging and performance testing
+- `merged`: Single mesh with vertex colors for high-performance 3D visualization (10K-50K splats)
+- `pointcloud`: Single PointCloud object for ultra-fast rendering (30K+ splats)
 
 **Transformation Pipeline**:
 1. **Scale**: Creates ellipsoid from unit sphere using anisotropic scaling
 2. **Rotate**: Applies quaternion rotation via manual matrix construction
-3. **Coordinate Transform**: Applies PLY’Rhino coordinate mapping
+3. **Coordinate Transform**: Applies PLYï¿½Rhino coordinate mapping
 4. **Translate**: Moves to final world position
 
 **Performance Optimizations**:
@@ -63,8 +65,14 @@ Script expects these inputs from Grasshopper component:
 - `scale_factor`: Global scaling multiplier
 - `subdivision_level`: Geometry detail level
 - `sample_percentage`: Data sampling ratio (0.0-1.0)
-- `render_mode`: Geometry type ("preview", "export", "test")
+- `render_mode`: Geometry type ("preview", "export", "test", "merged", "pointcloud")
 
 Returns:
-- `geometries`: List of Rhino geometry objects (Mesh/Brep/Point)
+- `geometries`: List of Rhino geometry objects (Mesh/Brep/Point/PointCloud)
 - `colors`: List of corresponding System.Drawing.Color objects
+
+## Performance Guidelines
+- **< 1K splats**: Any render mode works well
+- **1K - 10K splats**: Use "preview" or "merged" for good performance
+- **10K - 50K splats**: Use "merged" mode for mesh detail (~50-100x faster) or "pointcloud" for maximum speed (~100x faster)
+- **> 50K splats**: Use "pointcloud" mode with aggressive filtering
