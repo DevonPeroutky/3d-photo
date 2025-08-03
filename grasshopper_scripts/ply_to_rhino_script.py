@@ -37,7 +37,7 @@ class GaussianSplatReader:
     def __init__(self):
         """Initialize the GaussianSplatReader with performance monitoring."""
         self.perf_monitor = PerformanceMonitor()
-        self._base_sphere_mesh = None
+        # Sphere mesh cache will be initialized on first use
 
     # -----------------------------
     # Filters
@@ -550,17 +550,39 @@ class GaussianSplatReader:
             # Return identity transform as fallback
             return RG.Transform.Identity
 
-    def _get_base_sphere_mesh(self) -> RG.Mesh:
-        """Get or create a cached base sphere mesh for instancing.
+    def _get_base_sphere_mesh(
+        self,
+        scale_x: float = 1.0,
+        scale_y: float = 1.0,
+        scale_z: float = 1.0,
+        edge_density: float = 8.0,
+    ) -> RG.Mesh:
+        """Get or create a cached base sphere mesh with anisotropic subdivision based on expected scaling.
 
+        Args:
+            scale_x, scale_y, scale_z: Expected scale factors for this splat
+            edge_density: Target edge density factor for subdivision calculation (default: 8.0)
+                         Higher values = more subdivisions, better quality for stretched geometry
         Returns:
-            RG.Mesh: A unit sphere mesh at origin for reuse
+            RG.Mesh: A unit sphere mesh at origin optimized for the given anisotropy
         """
-        if self._base_sphere_mesh is None:
-            self._base_sphere_mesh = RG.Mesh.CreateFromSphere(
-                RG.Sphere(RG.Point3d.Origin, 1.0), 4, 4
+        # Calculate anisotropic subdivisions based on the expected scaling
+        # Choose UV divisions that respect anisotropy to prevent blockiness
+        longest = max(scale_x, scale_y, scale_z)
+        uDiv = int(max(4, round(longest * edge_density)))
+        vDiv = max(2, uDiv // 2)  # Keep roughly square quads, minimum of 2
+
+        # Create cache key based on subdivision levels to support different resolutions
+        cache_key = f"sphere_mesh_{uDiv}_{vDiv}"
+        if not hasattr(self, "_sphere_mesh_cache"):
+            self._sphere_mesh_cache = {}
+
+        if cache_key not in self._sphere_mesh_cache:
+            # Create sphere with anisotropy-aware subdivisions
+            self._sphere_mesh_cache[cache_key] = RG.Mesh.CreateFromSphere(
+                RG.Sphere(RG.Point3d.Origin, 1.0), uDiv, vDiv
             )
-        return self._base_sphere_mesh
+        return self._sphere_mesh_cache[cache_key]
 
     def _apply_splat_transformations(
         self,
@@ -612,24 +634,41 @@ class GaussianSplatReader:
         translation = RG.Transform.Translation(RG.Vector3d(transformed_pos))
         geometry.Transform(translation)
 
-    def create_splat_mesh_in_rhino(self, splat: GaussianSplat) -> RG.Mesh:
+    def create_splat_mesh_in_rhino(
+        self,
+        splat: GaussianSplat,
+        scale_multiplier: float = 2.5,
+        subdivision_level: int = 3,
+    ) -> RG.Mesh:
         """Create a Rhino Mesh object from a GaussianSplat instance.
         This method creates an ellipsoid mesh based on the splat parameters.
-        Much faster than Breps for visualization purposes. Uses mesh instancing for performance.
+        Much faster than Breps for visualization purposes. Uses anisotropic mesh instancing for quality.
 
         Args:
             splat (GaussianSplat): The GaussianSplat instance containing parameters.
+            scale_multiplier (float): Multiplier for Gaussian scales to represent visual extent (default: 2.5)
+            subdivision_level (int): Base subdivision level for mesh detail (default: 3, used as edge_density)
         Returns:
             RG.Mesh: The resulting Mesh object representing the splat.
         """
-        # Get cached base sphere mesh and create a copy for transformation
-        base_mesh = self._get_base_sphere_mesh()
+        # FIX: Gaussian splat scales represent standard deviation (σ), not radius
+        # Visual extent of Gaussian is ~2-3σ (95-99% of distribution)
+        # Apply scale multiplier to convert from statistical to visual representation
+        scale_x = splat.scale.X * scale_multiplier
+        scale_y = splat.scale.Y * scale_multiplier
+        scale_z = splat.scale.Z * scale_multiplier
+
+        # Get anisotropic base sphere mesh based on expected scaling
+        base_mesh = self._get_base_sphere_mesh(
+            scale_x, scale_y, scale_z, edge_density=subdivision_level * 2.0
+        )
         mesh = base_mesh.Duplicate()
 
-        # Apply all transformations using shared helper method
-        scale_x, scale_y, scale_z = splat.scale.X, splat.scale.Y, splat.scale.Z
-
         self._apply_splat_transformations(mesh, scale_x, scale_y, scale_z, splat)
+
+        # Recalculate normals after scaling to fix lighting on stretched meshes
+        # This prevents Rhino from reusing unit-sphere normals on stretched geometry
+        mesh.Normals.ComputeNormals()
 
         return mesh
 
@@ -648,7 +687,12 @@ class GaussianSplatReader:
         )
         return RG.Point(transformed_pos)
 
-    def create_merged_mesh(self, splats: List[GaussianSplat]) -> RG.Mesh:
+    def create_merged_mesh(
+        self,
+        splats: List[GaussianSplat],
+        scale_multiplier: float = 2.5,
+        subdivision_level: int = 3,
+    ) -> RG.Mesh:
         """Create a single merged mesh containing all splat geometries with vertex colors.
 
         PERFORMANCE OPTIMIZATION: Instead of creating thousands of individual mesh objects,
@@ -670,6 +714,8 @@ class GaussianSplatReader:
 
         Args:
             splats: List of GaussianSplat objects to convert
+            scale_multiplier (float): Multiplier for Gaussian scales to represent visual extent (default: 2.5)
+            subdivision_level (int): Sphere subdivision level for mesh detail (default: 3)
         Returns:
             RG.Mesh: Single merged mesh containing all splat geometries with vertex colors
         """
@@ -681,24 +727,38 @@ class GaussianSplatReader:
         # Create merged mesh
         merged_mesh = RG.Mesh()
 
-        # Get cached base sphere for instancing
-        base_sphere = self._get_base_sphere_mesh()
-
         for splat in splats:
-            # Create individual sphere mesh with transformations
+            # FIX: Apply scale multiplier to convert from Gaussian σ to visual extent
+            scale_x = splat.scale.X * scale_multiplier
+            scale_y = splat.scale.Y * scale_multiplier
+            scale_z = splat.scale.Z * scale_multiplier
+
+            # Get anisotropic base sphere mesh based on this splat's scaling
+            base_sphere = self._get_base_sphere_mesh(
+                scale_x, scale_y, scale_z, edge_density=subdivision_level * 2.0
+            )
+            # base_sphere = RG.Mesh.CreateFromSphere(
+            #     RG.Sphere(RG.Point3d.Origin, 1.0), 3, 3
+            # )
             sphere_mesh = base_sphere.Duplicate()
 
-            # Apply transformations (scale, rotate, coordinate transform, translate)
-            scale_x, scale_y, scale_z = splat.scale.X, splat.scale.Y, splat.scale.Z
             self._apply_splat_transformations(
                 sphere_mesh, scale_x, scale_y, scale_z, splat
             )
 
-            # Convert spherical harmonics to RGB color
+            # Recalculate normals after scaling for proper lighting
+            sphere_mesh.Normals.ComputeNormals()
+
+            # Convert spherical harmonics to RGB color with opacity/alpha
             r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
             g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
             b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
-            color = SD.Color.FromArgb(r, g, b)
+            # FIX: Include opacity as alpha channel for transparency support
+            # alpha = int(
+            #     splat.opacity * 255
+            # )
+            alpha = 255
+            color = SD.Color.FromArgb(alpha, r, g, b)
 
             # Store vertex count before merging for color assignment
             vertex_start_index = merged_mesh.Vertices.Count
@@ -770,18 +830,28 @@ class GaussianSplatReader:
                 splat.position.X, splat.position.Z, -splat.position.Y
             )
 
-            # Convert spherical harmonics to RGB color using existing utility
+            # Convert spherical harmonics to RGB color with opacity/alpha
             r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
             g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
             b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
-            color = SD.Color.FromArgb(r, g, b)
+            # FIX: Include opacity as alpha channel for transparency support
+            alpha = int(
+                splat.opacity * 255
+            )  # Convert opacity [0.0-1.0] to alpha [0-255]
+            color = SD.Color.FromArgb(alpha, r, g, b)
 
             # Add point with color to the point cloud
             point_cloud.Add(transformed_pos, color)
 
         return point_cloud
 
-    def create_splat_geometry(self, splat: GaussianSplat, render_mode: str = "preview"):
+    def create_splat_geometry(
+        self,
+        splat: GaussianSplat,
+        render_mode: str = "preview",
+        scale_multiplier: float = 2.5,
+        subdivision_level: int = 3,
+    ):
         """Create either a mesh or Brep from a GaussianSplat based on render mode.
 
         NOTE: This method handles individual splat geometry creation. For pointcloud and merged modes,
@@ -790,25 +860,32 @@ class GaussianSplatReader:
         Args:
             splat (GaussianSplat): The GaussianSplat instance containing parameters.
             render_mode (str): "preview" for fast mesh, "export" for precise Brep, for points
+            scale_multiplier (float): Multiplier for Gaussian scales to represent visual extent (default: 2.5)
+            subdivision_level (int): Sphere subdivision level for mesh detail (default: 3)
         Returns:
             RG.Mesh or RG.Brep or RG.Point: The resulting geometry object.
         """
         if render_mode == "preview":
-            return self.create_splat_mesh_in_rhino(splat)
+            return self.create_splat_mesh_in_rhino(
+                splat, scale_multiplier, subdivision_level
+            )
         elif render_mode == "export":
-            return self.create_splat_object_in_rhino(splat)
+            return self.create_splat_object_in_rhino(splat, scale_multiplier)
         else:
             raise ValueError(
                 f"Invalid render_mode: {render_mode}. Use 'preview', 'export', 'test', 'pointcloud', or 'merged'"
             )
 
-    def create_splat_object_in_rhino(self, splat: GaussianSplat) -> RG.Brep:
+    def create_splat_object_in_rhino(
+        self, splat: GaussianSplat, scale_multiplier: float = 2.5
+    ) -> RG.Brep:
         """Create a Rhino Brep object from a GaussianSplat instance.
         This method creates an ellipsoid based on the splat parameters.
         It uses the position, scale, and rotation to define the ellipsoid's geometry.
 
         Args:
             splat (GaussianSplat): The GaussianSplat instance containing parameters.
+            scale_multiplier (float): Multiplier for Gaussian scales to represent visual extent (default: 2.5)
         Returns:
             RG.Brep: The resulting Brep object representing the splat.
         """
@@ -816,8 +893,13 @@ class GaussianSplatReader:
         sphere = RG.Sphere(RG.Point3d.Origin, 1.0)
         nurbs_surface = sphere.ToNurbsSurface()
 
-        # Apply all transformations using shared helper method
-        scale_x, scale_y, scale_z = splat.scale.X, splat.scale.Y, splat.scale.Z
+        # FIX: Gaussian splat scales represent standard deviation (σ), not radius
+        # Visual extent of Gaussian is ~2-3σ (95-99% of distribution)
+        # Apply scale multiplier to convert from statistical to visual representation
+        scale_x = splat.scale.X * scale_multiplier
+        scale_y = splat.scale.Y * scale_multiplier
+        scale_z = splat.scale.Z * scale_multiplier
+
         self._apply_splat_transformations(
             nurbs_surface, scale_x, scale_y, scale_z, splat
         )
@@ -832,6 +914,8 @@ class GaussianSplatReader:
         splats: List[GaussianSplat],
         render_mode: str = "preview",
         vector_offset: RG.Vector3d = RG.Vector3d(0, 0, 0),
+        scale_multiplier: float = 2.5,
+        subdivision_level: int = 3,
     ) -> Tuple[List[RG.GeometryBase], List[SD.Color]]:
         """Render a list of Gaussian splats in Rhino using the specified render mode.
 
@@ -841,6 +925,8 @@ class GaussianSplatReader:
                          "test" for point rendering, "pointcloud" for single PointCloud object,
                          "merged" for single merged Mesh object
             vector_offset: Optional offset vector to apply to all splat positions
+            scale_multiplier: Multiplier for Gaussian scales to represent visual extent (default: 2.5)
+            subdivision_level: Sphere subdivision level for mesh detail (default: 3)
         Returns:
             List of RG.GeometryBase objects representing the rendered splats
         """
@@ -862,23 +948,36 @@ class GaussianSplatReader:
             return [point_cloud], [SD.Color.White]  # No colors needed for point cloud
 
         elif render_mode == "merged":
-            merged_mesh = self.create_merged_mesh(transformed_splats)
-            return [merged_mesh], [SD.Color.White]  # No colors needed for merged mesh
+            merged_mesh = self.create_merged_mesh(
+                transformed_splats, scale_multiplier, subdivision_level
+            )
+            return [
+                merged_mesh
+            ], []  # Empty color list - mesh uses vertex colors instead
         elif render_mode == "preview":
             rendered_objects, colors = [], []
 
             for splat in transformed_splats:
-                geometry = self.create_splat_geometry(splat, render_mode)
+                geometry = self.create_splat_geometry(
+                    splat, render_mode, scale_multiplier, subdivision_level
+                )
                 rendered_objects.append(geometry)
                 r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
                 g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
                 b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
 
-                color = SD.Color.FromArgb(r, g, b)
+                # FIX: Include opacity as alpha channel for transparency support
+                alpha = int(
+                    splat.opacity * 255
+                )  # Convert opacity [0.0-1.0] to alpha [0-255]
+                color = SD.Color.FromArgb(alpha, r, g, b)
                 colors.append(color)
             print(
                 f"Rendered {len(rendered_objects)} transformed_splats in preview mode"
             )
+            print(
+                f"{self._sphere_mesh_cache.keys()} keys in the cache"
+            )  # Debug: print cached sphere mesh keys
             return rendered_objects, colors
         else:
             raise ValueError(
@@ -1090,88 +1189,121 @@ class GaussianSplatReader:
 
         # Filter and sample the splat data
         # splat_data = self.simple_sampling(splat_data, sample_percentage)
-        # splat_data = self.apply_filters(splat_data)
         splat_data = self.normalize_splat_position_to_origin(splat_data)
         centroid_point, centroid_cube, centroid_color = self.visualize_centroid(
             splat_data
         )
         splat_data = self.sample_by_region(splat_data, centroid_point, 2)
+        splat_data = self.apply_filters(splat_data)
 
         pointcloud_geometries, pointcoud_colors = self.render_splats(
             splats=splat_data,
             render_mode="pointcloud",
             vector_offset=RG.Vector3d(0, 0, 10),
+            scale_multiplier=2.5,  # Not used for pointcloud mode, but consistent API
         )
         merged_geometries, merged_colors = self.render_splats(
             splats=splat_data,
-            render_mode="preview",
+            render_mode="merged",
             vector_offset=RG.Vector3d(0, 0, 0),
-        )
-        print(f"DEBUG: merged_geometries count: {len(merged_geometries)}")
-        print(
-            f"DEBUG: merged_geometries types: {[type(g).__name__ for g in merged_geometries[:5]]}"
-        )
-        print(
-            f"DEBUG: merged_geometries validity: {[g.IsValid if hasattr(g, 'IsValid') else 'N/A' for g in merged_geometries[:5]]}"
+            # scale_multiplier=2.5,  # Apply scale multiplier to fix mesh sizes
+            scale_multiplier=scale_factor,  # Apply scale multiplier to fix mesh sizes
+            subdivision_level=subdivision_level,
         )
 
         geometries = pointcloud_geometries + merged_geometries
         colors = pointcoud_colors + merged_colors
 
-        # Create Rhino geometries based on render mode
-        # if render_mode == "pointcloud":
-        #     # Create single PointCloud object instead of individual geometries
-        #     point_cloud = self.create_colored_point_cloud(splat_data)
-        #
-        #     # For pointcloud mode, return single object with placeholder color
-        #     # Grasshopper will handle the point cloud's internal colors
-        #     geometries = [centroid_cube, point_cloud]
-        #     colors = [
-        #         centroid_color,
-        #         SD.Color.White,
-        #     ]  # Placeholder color for point cloud
-        #
-        # elif render_mode == "merged":
-        #     # Create single merged mesh containing all splat geometries
-        #     merged_mesh = self.create_merged_mesh(splat_data)
-        #
-        #     # For merged mode, return single mesh object with placeholder color
-        #     # Vertex colors are embedded in the mesh itself
-        #     geometries = [centroid_cube, merged_mesh]
-        #     colors = [
-        #         centroid_color,
-        #         SD.Color.White,
-        #     ]  # Placeholder color for merged mesh
-        #
-        # else:
-        #     # Standard mode: create individual geometry objects
-        #     geometries, colors = (
-        #         [centroid_cube],
-        #         [centroid_color],
-        #     )  # Start with centroid cube
-        #
-        #     for splat in splat_data:
-        #         # Create 3D ellipsoid geometry (mesh or brep) for each Gaussian splat
-        #         geometry = self.create_splat_geometry(splat, render_mode)
-        #         geometries.append(geometry)
-        #
-        #         # Convert spherical harmonics to RGB color
-        #         r = ColorUtils.sh_to_rgb(splat.color[0])  # Red channel from f_dc_0
-        #         g = ColorUtils.sh_to_rgb(splat.color[1])  # Green channel from f_dc_1
-        #         b = ColorUtils.sh_to_rgb(splat.color[2])  # Blue channel from f_dc_2
-        #
-        #         color = SD.Color.FromArgb(r, g, b)
-        #         colors.append(color)
-        #
         # Track final geometry statistics
         self.perf_monitor.track_geometry_stats(geometries, render_mode)
 
         # Return geometries and colors
         print(len(geometries), "geometries created")
-        print(geometries[:3])
-        print(colors[:3])
+
+        # DEBUG: Add scale and performance analysis
+        self._debug_splat_analysis(splat_data, geometries, colors)
+
         return (geometries, colors)
-        # return ([], [])
+
+    def _debug_splat_analysis(
+        self, splats: List[GaussianSplat], geometries: List, colors: List
+    ):
+        """Print debugging information about splat scales and mesh sizes for validation.
+
+        This helps users understand if the scale multiplier is appropriate and if the
+        mesh sizes are visually correct compared to the original Gaussian splat data.
+        """
+        print(f"\n=== SPLAT SCALE DEBUG ANALYSIS ===")
+
+        if len(splats) == 0:
+            print("No splats to analyze")
+            return
+
+        # Analyze original Gaussian splat scales
+        original_scales = []
+        for splat in splats:
+            # Calculate geometric mean of X,Y,Z scales
+            geom_mean = np.power(splat.scale.X * splat.scale.Y * splat.scale.Z, 1 / 3)
+            original_scales.append(geom_mean)
+
+        original_scales = np.array(original_scales)
+
+        # Analyze mesh sizes (if using mesh modes)
+        mesh_count = 0
+        total_vertices = 0
+        for geom in geometries:
+            if hasattr(geom, "Vertices"):  # It's a mesh
+                mesh_count += 1
+                if hasattr(geom.Vertices, "Count"):
+                    total_vertices += geom.Vertices.Count
+
+        print(f"Original Gaussian scales (σ):")
+        print(
+            f"  Min: {np.min(original_scales):.6f}, Max: {np.max(original_scales):.6f}"
+        )
+        print(
+            f"  Mean: {np.mean(original_scales):.6f}, Median: {np.median(original_scales):.6f}"
+        )
+
+        print(f"Applied scale multiplier: 2.5x")
+        visual_scales = original_scales * 2.5
+        print(f"Visual mesh scales (2.5σ):")
+        print(f"  Min: {np.min(visual_scales):.6f}, Max: {np.max(visual_scales):.6f}")
+        print(
+            f"  Mean: {np.mean(visual_scales):.6f}, Median: {np.median(visual_scales):.6f}"
+        )
+
+        print(f"Geometry statistics:")
+        print(f"  Total geometries: {len(geometries)}")
+        print(f"  Mesh objects: {mesh_count}")
+        if mesh_count > 0:
+            print(
+                f"  Total vertices: {total_vertices} ({total_vertices / mesh_count:.1f} avg per mesh)"
+            )
+
+        # Scale validation warnings
+        tiny_scales = np.sum(visual_scales < 0.001)
+        huge_scales = np.sum(visual_scales > 5.0)
+
+        if tiny_scales > len(splats) * 0.1:
+            print(
+                f"⚠️  {tiny_scales} splats ({tiny_scales / len(splats) * 100:.1f}%) have very small scales (<0.001)"
+            )
+            print(f"   Consider increasing scale_multiplier or using pointcloud mode")
+
+        if huge_scales > 0:
+            print(f"⚠️  {huge_scales} splats have very large scales (>5.0)")
+            print(
+                f"   Consider decreasing scale_multiplier or applying scale filtering"
+            )
+
+        if huge_scales > 0:
+            print(f"⚠️  {huge_scales} splats have very large scales (>5.0)")
+            print(
+                f"   Consider decreasing scale_multiplier or applying scale filtering"
+            )
+
+        print(f"===================================\n")
 
 
 workflow_manager = GaussianSplatReader()
