@@ -34,13 +34,107 @@ from color_utils import ColorUtils
 
 
 class GaussianSplatReader:
+    """Handles loading and filtering of Gaussian splat data from PLY files."""
+    
     def __init__(self):
-        """Initialize the GaussianSplatReader with performance monitoring."""
+        """Initialize the GaussianSplatReader for PLY loading and filtering operations."""
         self.perf_monitor = PerformanceMonitor()
-        # Sphere mesh cache will be initialized on first use
+
+    def load_gaussian_splats(self, file_path: str) -> List[GaussianSplat]:
+        """Read the PLY above and return a list of GaussianSplat objects.
+        # 3D world coordinates
+        property float x:
+        property float y
+        property float z
+
+        # Normal unit vector components, indicating the surface orientation at each point
+        property float nx
+        property float ny
+        property float nz
+
+        # Spherical harmonics coefficients for the DC term representing the base RGB color
+        property float f_dc_0
+        property float f_dc_1
+        property float f_dc_2
+
+        # Transparency
+        property float opacity
+
+        # 3D Shape Parameters: Anisotropic scaling factors along the three principal axes
+        property float scale_0
+        property float scale_1
+        property float scale_2
+
+        # 3D Orientation: Quaternion rotation components
+        property float rot_0
+        property float rot_1
+        property float rot_2
+        property float rot_3
+        """
+        self.perf_monitor.start_timing("PLY file loading")
+
+        ply = plyfile.PlyData.read(file_path)
+        verts = ply["vertex"].data  # structured numpy array
+
+        splats = []
+        scale_values_log = []  # Track original log values
+        scale_values_real = []  # Track real (exp) values
+
+        for v in verts:
+            # FIX 1: Transform scale values from log space to real space
+            # Scale values are stored as logarithms (range: -7 to -0.25)
+            # Real scales are obtained by applying exp() function (range: ~0.02 to 0.35)
+            scale_log = [float(v["scale_0"]), float(v["scale_1"]), float(v["scale_2"])]
+            scale_values_log.extend(scale_log)
+
+            scale_real = RG.Vector3d(
+                math.exp(scale_log[0]),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
+                math.exp(scale_log[1]),
+                math.exp(scale_log[2]),
+            )
+            scale_values_real.extend([scale_real.X, scale_real.Y, scale_real.Z])
+
+            # FIX 2: Normalize quaternion rotation values
+            # Quaternions must have unit length (norm = 1.0) for valid rotations
+            # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
+            # Use standard quaternion component order: [rot_0, rot_1, rot_2, rot_3] = [x, y, z, w]
+            # quat_raw = np.array(
+            #     (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
+            # )            quat_raw = np.array((v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"]))  # Reorder to [w,x,y,z]
+            quat_raw = np.array(
+                (v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"])
+            )  # Reorder to [w,x,y,z]
+            quat_norm = np.linalg.norm(quat_raw)
+            quat_normalized = quat_raw if quat_norm <= 0 else quat_raw / quat_norm
+
+            # FIX 3: Transform opacity from logit space to probability space
+            # Opacity is stored in logit space (unbounded real numbers)
+            # Convert to [0,1] probability using sigmoid function: 1/(1+exp(-x))
+            opacity_logit = float(v["opacity"])
+            opacity_real = 1.0 / (
+                1.0 + math.exp(-opacity_logit)
+            )  # Sigmoid transformation
+
+            splats.append(
+                GaussianSplat(
+                    position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
+                    scale=scale_real,  # Now using properly transformed scales
+                    rotation_angles=quat_normalized,  # Now using normalized quaternions
+                    color=np.array(
+                        (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
+                    ),
+                    opacity=opacity_real,  # Now using properly transformed opacity
+                    normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
+                )
+            )
+
+        print(f"Loaded {len(splats)} Gaussian splats from {file_path}")
+
+        self.perf_monitor.end_timing()
+        return splats
 
     # -----------------------------
-    # Filters
+    # Filtering Methods
     # -----------------------------
     def filter_by_opacity(
         self, splats: List[GaussianSplat], min_opacity: float = 0.1
@@ -488,6 +582,59 @@ class GaussianSplatReader:
 
         self.perf_monitor.end_timing()
         return filtered_splats
+
+    def sample_by_region(
+        self,
+        splats: List[GaussianSplat],
+        region_center: RG.Point3d,
+        radius: float,
+    ) -> List[GaussianSplat]:
+        """Sample splats within a specified radius from a center point."""
+        sampled_splats = [
+            splat
+            for splat in splats
+            if splat.position.DistanceTo(region_center) <= radius
+        ]
+        print(
+            f"Sampled {len(sampled_splats)} splats within radius {radius} from {region_center}"
+        )
+        return sampled_splats
+
+    def normalize_splat_position_to_origin(
+        self, splat_data: List[GaussianSplat]
+    ) -> List[GaussianSplat]:
+        """Normalize splat positions around the origin by centering the point cloud."""
+        # Normalize position around origin
+        average_x_position = np.mean([splat.position.X for splat in splat_data])
+        avg_y_position = np.mean([splat.position.Y for splat in splat_data])
+        avg_z_position = np.mean([splat.position.Z for splat in splat_data])
+
+        splat_data = [
+            GaussianSplat(
+                position=RG.Point3d(
+                    splat.position.X - average_x_position,
+                    splat.position.Y - avg_y_position,
+                    splat.position.Z - avg_z_position,
+                ),
+                scale=splat.scale,
+                rotation_angles=splat.rotation_angles,
+                color=splat.color,
+                opacity=splat.opacity,
+                normal=splat.normal,
+            )
+            for splat in splat_data
+        ]
+        return splat_data
+
+
+class WorkflowManager:
+    """Handles Rhino geometry creation, rendering, and workflow orchestration for Gaussian splats."""
+    
+    def __init__(self):
+        """Initialize the WorkflowManager with performance monitoring and data reader."""
+        self.perf_monitor = PerformanceMonitor()
+        self.splat_reader = GaussianSplatReader()
+        # Sphere mesh cache will be initialized on first use
 
     # -----------------------------
     # Rhino Geometry Creation
@@ -1475,146 +1622,6 @@ class GaussianSplatReader:
     # -----------------------------
     # Workflow Utility Functions
     # -----------------------------
-    def simple_sampling(
-        self, splats: List[GaussianSplat], sample_percentage: float
-    ) -> List[GaussianSplat]:
-        assert 0 < sample_percentage <= 1, "Sample percentage must be between 0 and 1"
-        return random.sample(splats, int(len(splats) * sample_percentage))
-
-    def sample_by_region(
-        self,
-        splats: List[GaussianSplat],
-        region_center: RG.Point3d,
-        radius: float,
-    ) -> List[GaussianSplat]:
-        """Sample splats within a specified radius from a center point."""
-        sampled_splats = [
-            splat
-            for splat in splats
-            if splat.position.DistanceTo(region_center) <= radius
-        ]
-        print(
-            f"Sampled {len(sampled_splats)} splats within radius {radius} from {region_center}"
-        )
-        return sampled_splats
-
-    def load_gaussian_splats(self, file_path: str) -> List[GaussianSplat]:
-        """Read the PLY above and return a list of GaussianSplat objects.
-        # 3D world coordinates
-        property float x:
-        property float y
-        property float z
-
-        # Normal unit vector components, indicating the surface orientation at each point
-        property float nx
-        property float ny
-        property float nz
-
-        # Spherical harmonics coefficients for the DC term representing the base RGB color
-        property float f_dc_0
-        property float f_dc_1
-        property float f_dc_2
-
-        # Transparency
-        property float opacity
-
-        # 3D Shape Parameters: Anisotropic scaling factors along the three principal axes
-        property float scale_0
-        property float scale_1
-        property float scale_2
-
-        # 3D Orientation: Quaternion rotation components
-        property float rot_0
-        property float rot_1
-        property float rot_2
-        property float rot_3
-        """
-        self.perf_monitor.start_timing("PLY file loading")
-
-        ply = plyfile.PlyData.read(file_path)
-        verts = ply["vertex"].data  # structured numpy array
-
-        splats = []
-        scale_values_log = []  # Track original log values
-        scale_values_real = []  # Track real (exp) values
-
-        for v in verts:
-            # FIX 1: Transform scale values from log space to real space
-            # Scale values are stored as logarithms (range: -7 to -0.25)
-            # Real scales are obtained by applying exp() function (range: ~0.02 to 0.35)
-            scale_log = [float(v["scale_0"]), float(v["scale_1"]), float(v["scale_2"])]
-            scale_values_log.extend(scale_log)
-
-            scale_real = RG.Vector3d(
-                math.exp(scale_log[0]),  # exp(-7) ≈ 0.0009, exp(-0.25) ≈ 0.78
-                math.exp(scale_log[1]),
-                math.exp(scale_log[2]),
-            )
-            scale_values_real.extend([scale_real.X, scale_real.Y, scale_real.Z])
-
-            # FIX 2: Normalize quaternion rotation values
-            # Quaternions must have unit length (norm = 1.0) for valid rotations
-            # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
-            # Use standard quaternion component order: [rot_0, rot_1, rot_2, rot_3] = [x, y, z, w]
-            # quat_raw = np.array(
-            #     (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
-            # )            quat_raw = np.array((v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"]))  # Reorder to [w,x,y,z]
-            quat_raw = np.array(
-                (v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"])
-            )  # Reorder to [w,x,y,z]
-            quat_norm = np.linalg.norm(quat_raw)
-            quat_normalized = quat_raw if quat_norm <= 0 else quat_raw / quat_norm
-
-            # FIX 3: Transform opacity from logit space to probability space
-            # Opacity is stored in logit space (unbounded real numbers)
-            # Convert to [0,1] probability using sigmoid function: 1/(1+exp(-x))
-            opacity_logit = float(v["opacity"])
-            opacity_real = 1.0 / (
-                1.0 + math.exp(-opacity_logit)
-            )  # Sigmoid transformation
-
-            splats.append(
-                GaussianSplat(
-                    position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
-                    scale=scale_real,  # Now using properly transformed scales
-                    rotation_angles=quat_normalized,  # Now using normalized quaternions
-                    color=np.array(
-                        (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
-                    ),
-                    opacity=opacity_real,  # Now using properly transformed opacity
-                    normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
-                )
-            )
-
-        print(f"Loaded {len(splats)} Gaussian splats from {file_path}")
-
-        self.perf_monitor.end_timing()
-        return splats
-
-    def normalize_splat_position_to_origin(
-        self, splat_data: List[GaussianSplat]
-    ) -> List[GaussianSplat]:
-        # Normalize position around origin
-        average_x_position = np.mean([splat.position.X for splat in splat_data])
-        avg_y_position = np.mean([splat.position.Y for splat in splat_data])
-        avg_z_position = np.mean([splat.position.Z for splat in splat_data])
-
-        splat_data = [
-            GaussianSplat(
-                position=RG.Point3d(
-                    splat.position.X - average_x_position,
-                    splat.position.Y - avg_y_position,
-                    splat.position.Z - avg_z_position,
-                ),
-                scale=splat.scale,
-                rotation_angles=splat.rotation_angles,
-                color=splat.color,
-                opacity=splat.opacity,
-                normal=splat.normal,
-            )
-            for splat in splat_data
-        ]
-        return splat_data
 
     def visualize_centroid(self, splat_data: List[GaussianSplat]) -> RG.Brep:
         # Calculate centroid
@@ -1659,16 +1666,16 @@ class GaussianSplatReader:
         )
 
         # Read Gaussian splats from PLY file
-        splat_data = self.load_gaussian_splats(file_path)
+        splat_data = self.splat_reader.load_gaussian_splats(file_path)
 
         # Filter and sample the splat data
-        # splat_data = self.simple_sampling(splat_data, sample_percentage)
-        splat_data = self.normalize_splat_position_to_origin(splat_data)
+        # splat_data = self.splat_reader.simple_sampling(splat_data, sample_percentage)
+        splat_data = self.splat_reader.normalize_splat_position_to_origin(splat_data)
         centroid_point, centroid_cube, centroid_color = self.visualize_centroid(
             splat_data
         )
-        splat_data = self.sample_by_region(splat_data, centroid_point, 2)
-        splat_data = self.apply_filters(splat_data)
+        splat_data = self.splat_reader.sample_by_region(splat_data, centroid_point, 2)
+        splat_data = self.splat_reader.apply_filters(splat_data)
 
         pointcloud_geometries, pointcoud_colors = self.render_splats(
             splats=splat_data,
@@ -1781,7 +1788,7 @@ class GaussianSplatReader:
         print(f"===================================\n")
 
 
-workflow_manager = GaussianSplatReader()
+workflow_manager = WorkflowManager()
 
 # This variables should be set by the Grasshopper environment
 debug_mode = globals().get("debug_mode", True)  # Default to False if not provided
