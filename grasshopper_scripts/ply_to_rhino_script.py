@@ -35,7 +35,7 @@ from color_utils import ColorUtils
 
 class GaussianSplatReader:
     """Handles loading and filtering of Gaussian splat data from PLY files."""
-    
+
     def __init__(self):
         """Initialize the GaussianSplatReader for PLY loading and filtering operations."""
         self.perf_monitor = PerformanceMonitor()
@@ -629,7 +629,7 @@ class GaussianSplatReader:
 
 class WorkflowManager:
     """Handles Rhino geometry creation, rendering, and workflow orchestration for Gaussian splats."""
-    
+
     def __init__(self):
         """Initialize the WorkflowManager with performance monitoring and data reader."""
         self.perf_monitor = PerformanceMonitor()
@@ -640,63 +640,18 @@ class WorkflowManager:
     # Rhino Geometry Creation
     # -----------------------------
     def quaternion_to_rotation_transform(self, quat_wxyz: np.ndarray) -> RG.Transform:
-        """Convert a normalized quaternion to a Rhino rotation transformation.
+        """Convert a normalized quaternion to a Rhino rotation transformation using native API.
 
         Args:
-            quat: Normalized quaternion as numpy array [rot_0, rot_1, rot_2, rot_3]
+            quat_wxyz: Normalized quaternion as numpy array [w, x, y, z]
         Returns:
             RG.Transform: Rotation transformation matrix
         """
+        w, x, y, z = map(float, quat_wxyz)
 
-        # Convert numpy array to python floats and handle potential data type issues
-        try:
-            # Extract quaternion components - assume [rot_0, rot_1, rot_2, rot_3] format from PLY
-            # This appears to be [x, y, z, w] based on common conventions
-            w, x, y, z = map(float, quat_wxyz)
-
-            # Manually create rotation matrix from quaternion components
-            # This avoids the System.Double conversion issues with RG.Quaternion constructor
-            rotation_matrix = RG.Transform.Identity
-
-            # Standard quaternion to rotation matrix conversion
-            # Assumes normalized quaternion
-            xx = x * x
-            yy = y * y
-            zz = z * z
-            xy = x * y
-            xz = x * z
-            yz = y * z
-            wx = w * x
-            wy = w * y
-            wz = w * z
-
-            # Build rotation matrix manually
-            rotation_matrix.M00 = 1.0 - 2.0 * (yy + zz)
-            rotation_matrix.M01 = 2.0 * (xy - wz)
-            rotation_matrix.M02 = 2.0 * (xz + wy)
-            rotation_matrix.M03 = 0.0
-
-            rotation_matrix.M10 = 2.0 * (xy + wz)
-            rotation_matrix.M11 = 1.0 - 2.0 * (xx + zz)
-            rotation_matrix.M12 = 2.0 * (yz - wx)
-            rotation_matrix.M13 = 0.0
-
-            rotation_matrix.M20 = 2.0 * (xz - wy)
-            rotation_matrix.M21 = 2.0 * (yz + wx)
-            rotation_matrix.M22 = 1.0 - 2.0 * (xx + yy)
-            rotation_matrix.M23 = 0.0
-
-            rotation_matrix.M30 = 0.0
-            rotation_matrix.M31 = 0.0
-            rotation_matrix.M32 = 0.0
-            rotation_matrix.M33 = 1.0
-
-            return rotation_matrix
-
-        except Exception as e:
-            print(f"Failed to create rotation matrix from quaternion {quat}: {e}")
-            # Return identity transform as fallback
-            return RG.Transform.Identity
+        # Use native Rhino Quaternion API (a, b, c, d format where a=w, b=x, c=y, d=z)
+        quaternion = RG.Quaternion(w, x, y, z)
+        return quaternion.GetRotation()
 
     def _get_base_sphere_mesh(
         self,
@@ -747,20 +702,14 @@ class WorkflowManager:
             scale_x, scale_y, scale_z: Scale factors for ellipsoid
             splat: GaussianSplat containing rotation and position data
         """
-        # 1. SCALE: Apply scaling transformation to create ellipsoid
-        scale_transform = RG.Transform.Scale(
-            RG.Plane.WorldXY, scale_x, scale_y, scale_z
+
+        # 1. scale (NeRF frame)
+        geometry.Transform(
+            RG.Transform.Scale(RG.Plane.WorldXY, scale_x, scale_y, scale_z)
         )
-        geometry.Transform(scale_transform)
 
         # 2. ROTATE: Apply quaternion rotation
-        try:
-            rotation_transform = self.quaternion_to_rotation_transform(
-                splat.rotation_angles
-            )
-            geometry.Transform(rotation_transform)
-        except Exception as e:
-            print(f"Warning: Failed to apply rotation {splat.rotation_angles}: {e}")
+        geometry.Transform(self.quaternion_to_rotation_transform(splat.rotation_angles))
 
         # 3. COORDINATE SYSTEM TRANSFORMATION: Apply same (X, Z, -Y) transform as points
         coord_transform = RG.Transform.Identity
@@ -886,9 +835,6 @@ class WorkflowManager:
             base_sphere = self._get_base_sphere_mesh(
                 scale_x, scale_y, scale_z, edge_density=subdivision_level * 2.0
             )
-            # base_sphere = RG.Mesh.CreateFromSphere(
-            #     RG.Sphere(RG.Point3d.Origin, 1.0), 3, 3
-            # )
             sphere_mesh = base_sphere.Duplicate()
 
             self._apply_splat_transformations(
@@ -1622,7 +1568,6 @@ class WorkflowManager:
     # -----------------------------
     # Workflow Utility Functions
     # -----------------------------
-
     def visualize_centroid(self, splat_data: List[GaussianSplat]) -> RG.Brep:
         # Calculate centroid
         splat_data_centroid = np.mean(
@@ -1677,11 +1622,14 @@ class WorkflowManager:
         splat_data = self.splat_reader.sample_by_region(splat_data, centroid_point, 2)
         splat_data = self.splat_reader.apply_filters(splat_data)
 
+        print(
+            f"Rendering Geometries with Render Mode: {render_mode}, scale factor: {scale_factor}, subdivision level: {subdivision_level}"
+        )
         pointcloud_geometries, pointcoud_colors = self.render_splats(
             splats=splat_data,
             render_mode="pointcloud",
             vector_offset=RG.Vector3d(0, 0, 10),
-            scale_multiplier=2.5,  # Not used for pointcloud mode, but consistent API
+            scale_multiplier=scale_factor,  # Not used for pointcloud mode, but consistent API
         )
         merged_geometries, merged_colors = self.render_splats(
             splats=splat_data,
@@ -1794,7 +1742,9 @@ workflow_manager = WorkflowManager()
 debug_mode = globals().get("debug_mode", True)  # Default to False if not provided
 file_path = globals().get("file_path", "../assets/JAPAN.ply")
 scale_factor = globals().get("scale_factor", 1)  # Default scale factor
-subdivision_level = globals().get("subdivision_level", 3)  # Default subdivision level
+subdivision_level = int(
+    globals().get("subdivision_level", 3)
+)  # Default subdivision level
 sample_percentage = globals().get("sample_percentage", 1.0)  # Default to 100%
 render_mode = globals().get("render_mode", "preview")  # Default render mode
 
