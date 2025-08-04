@@ -387,7 +387,10 @@ class GaussianSplatReader:
         # Default configuration - start with most effective filters for your use case
         filter_config = {
             "distance_centroid": {"enabled": True, "percentile": 99.0},
-            "opacity": {"enabled": False, "min_opacity": 0.05},
+            "opacity": {
+                "enabled": True,
+                "min_opacity": 0.1,
+            },  # Filter out low opacity splats
             "color_variance": {
                 "enabled": False,
                 "min_variance": 0.004,
@@ -398,9 +401,9 @@ class GaussianSplatReader:
                 "max_brightness": 0.81,
             },
             "scale": {
-                "enabled": False,
-                "min_scale_percentile": 5.0,
-                "max_scale_percentile": 95.0,
+                "enabled": True,
+                "min_scale_percentile": 2.0,  # More aggressive filtering
+                "max_scale_percentile": 98.0,
             },
             "statistical": {"enabled": False, "k_neighbors": 20, "std_ratio": 2.0},
             "radius": {
@@ -489,7 +492,7 @@ class GaussianSplatReader:
     # -----------------------------
     # Rhino Geometry Creation
     # -----------------------------
-    def quaternion_to_rotation_transform(self, quat: np.ndarray) -> RG.Transform:
+    def quaternion_to_rotation_transform(self, quat_wxyz: np.ndarray) -> RG.Transform:
         """Convert a normalized quaternion to a Rhino rotation transformation.
 
         Args:
@@ -497,14 +500,12 @@ class GaussianSplatReader:
         Returns:
             RG.Transform: Rotation transformation matrix
         """
+
         # Convert numpy array to python floats and handle potential data type issues
         try:
             # Extract quaternion components - assume [rot_0, rot_1, rot_2, rot_3] format from PLY
             # This appears to be [x, y, z, w] based on common conventions
-            x = float(quat[0])
-            y = float(quat[1])
-            z = float(quat[2])
-            w = float(quat[3])
+            w, x, y, z = map(float, quat_wxyz)
 
             # Manually create rotation matrix from quaternion components
             # This avoids the System.Double conversion issues with RG.Quaternion constructor
@@ -692,6 +693,7 @@ class GaussianSplatReader:
         splats: List[GaussianSplat],
         scale_multiplier: float = 2.5,
         subdivision_level: int = 3,
+        debug: bool = False,
     ) -> RG.Mesh:
         """Create a single merged mesh containing all splat geometries with vertex colors.
 
@@ -795,6 +797,134 @@ class GaussianSplatReader:
                 f"🚀 Estimated performance gain: {performance_gain:.0f}x faster than individual meshes"
             )
 
+        # Run debug analysis if enabled
+        if debug:
+            print(f"\n=== MERGED MESH DEBUG ANALYSIS ===")
+
+            # 1. Individual ellipsoid validation
+            print(f"1. Validating individual ellipsoids...")
+            ellipsoid_analysis = self.validate_individual_ellipsoids(
+                splats,
+                scale_multiplier,
+                subdivision_level,
+                sample_count=min(10, len(splats)),
+            )
+
+            if "error" not in ellipsoid_analysis:
+                print(
+                    f"   ✅ {ellipsoid_analysis['valid_count']}/{ellipsoid_analysis['sample_count']} individual ellipsoids created successfully"
+                )
+                for axis, stats in ellipsoid_analysis[
+                    "scale_ratio_consistency"
+                ].items():
+                    print(
+                        f"   📐 {axis}-axis scale ratio: mean={stats['mean']:.2f}, std={stats['std']:.2f}"
+                    )
+
+                for warning in ellipsoid_analysis.get("warnings", []):
+                    print(f"   {warning}")
+            else:
+                print(
+                    f"   ❌ Individual ellipsoid validation failed: {ellipsoid_analysis['error']}"
+                )
+
+            # 2. Bounding box analysis
+            print(f"\n2. Analyzing merged mesh bounds...")
+            bounds_analysis = self.analyze_merged_mesh_bounds(merged_mesh, splats)
+
+            if "error" not in bounds_analysis:
+                extents = bounds_analysis["mesh_extents"]
+                print(
+                    f"   📦 Mesh extents: X={extents['x']:.3f}, Y={extents['y']:.3f}, Z={extents['z']:.3f}"
+                )
+                print(
+                    f"   📏 Diagonal length: {bounds_analysis['diagonal_length']:.3f}"
+                )
+                print(
+                    f"   🎯 Centroid: ({bounds_analysis['centroid']['x']:.2f}, {bounds_analysis['centroid']['y']:.2f}, {bounds_analysis['centroid']['z']:.2f})"
+                )
+
+                scale_stats = bounds_analysis["scale_statistics"]
+                print(
+                    f"   🔢 Scale stats: min={scale_stats['min']:.6f}, max={scale_stats['max']:.3f}, mean={scale_stats['mean']:.3f}"
+                )
+
+                for warning in bounds_analysis.get("warnings", []):
+                    print(f"   {warning}")
+            else:
+                print(f"   ❌ Bounds analysis failed: {bounds_analysis['error']}")
+
+            # 3. Mesh quality analysis
+            print(f"\n3. Analyzing mesh quality...")
+            quality_analysis = self.analyze_mesh_quality(merged_mesh)
+
+            if "error" not in quality_analysis:
+                aspect_stats = quality_analysis["aspect_ratio_stats"]
+                print(
+                    f"   🔺 {quality_analysis['total_faces']} faces, {quality_analysis['analyzed_triangles']} triangles analyzed"
+                )
+                print(
+                    f"   📊 Aspect ratios: min={aspect_stats['min']:.1f}, max={aspect_stats['max']:.1f}, mean={aspect_stats['mean']:.1f}"
+                )
+
+                problematic = quality_analysis["problematic_faces"]
+                if problematic["high_aspect_ratio"] > 0:
+                    print(
+                        f"   ⚠️ {problematic['high_aspect_ratio']} faces with aspect ratio > 100"
+                    )
+                if problematic["extreme_aspect_ratio"] > 0:
+                    print(
+                        f"   🚨 {problematic['extreme_aspect_ratio']} faces with aspect ratio > 1000"
+                    )
+
+                if quality_analysis["degenerate_faces"] > 0:
+                    print(
+                        f"   💀 {quality_analysis['degenerate_faces']} degenerate faces detected"
+                    )
+
+                for warning in quality_analysis.get("warnings", []):
+                    print(f"   {warning}")
+            else:
+                print(f"   ❌ Quality analysis failed: {quality_analysis['error']}")
+
+            # 4. Summary and recommendations
+            print(f"\n4. Summary and recommendations:")
+            total_warnings = (
+                len(ellipsoid_analysis.get("warnings", []))
+                + len(bounds_analysis.get("warnings", []))
+                + len(quality_analysis.get("warnings", []))
+            )
+
+            if total_warnings == 0:
+                print(f"   ✅ Merged mesh appears healthy - no major issues detected")
+            else:
+                print(
+                    f"   ⚠️ {total_warnings} potential issues detected - review warnings above"
+                )
+
+                # Provide specific recommendations
+                if bounds_analysis.get("scale_statistics", {}).get("max", 0) > 10:
+                    print(
+                        f"   💡 Consider reducing scale_multiplier (currently {scale_multiplier}) or applying scale filtering"
+                    )
+
+                if (
+                    quality_analysis.get("problematic_faces", {}).get(
+                        "high_aspect_ratio", 0
+                    )
+                    > quality_analysis.get("analyzed_triangles", 1) * 0.1
+                ):
+                    print(
+                        f"   💡 High aspect ratio faces suggest extreme anisotropy - check quaternion rotations and scale values"
+                    )
+
+                if ellipsoid_analysis.get("failed_count", 0) > 0:
+                    print(
+                        f"   💡 Individual ellipsoid failures suggest issues with scale transformation or coordinate mapping"
+                    )
+
+            print(f"===================================\n")
+
         return merged_mesh
 
     def create_colored_point_cloud(self, splats: List[GaussianSplat]) -> RG.PointCloud:
@@ -844,6 +974,363 @@ class GaussianSplatReader:
             point_cloud.Add(transformed_pos, color)
 
         return point_cloud
+
+    def analyze_merged_mesh_bounds(
+        self, merged_mesh: RG.Mesh, splats: List[GaussianSplat]
+    ) -> dict:
+        """Analyze merged mesh bounding box to detect scale/unit mismatches.
+
+        Args:
+            merged_mesh: The merged mesh to analyze
+            splats: Original splat data for comparison
+        Returns:
+            Dictionary with bounding box analysis results
+        """
+        if not merged_mesh or merged_mesh.Vertices.Count == 0:
+            return {"error": "Empty or invalid mesh"}
+
+        # Get mesh bounding box
+        bbox = merged_mesh.GetBoundingBox(True)
+
+        # Calculate dimensions
+        x_extent = bbox.Max.X - bbox.Min.X
+        y_extent = bbox.Max.Y - bbox.Min.Y
+        z_extent = bbox.Max.Z - bbox.Min.Z
+        diagonal = bbox.Diagonal.Length
+        centroid = bbox.Center
+
+        # Calculate expected bounds from original splat data
+        positions = [
+            [s.position.X, s.position.Z, -s.position.Y] for s in splats
+        ]  # Apply coord transform
+        pos_array = np.array(positions)
+        expected_min = np.min(pos_array, axis=0)
+        expected_max = np.max(pos_array, axis=0)
+        expected_extents = expected_max - expected_min
+
+        # Calculate scale statistics from splats
+        scales = []
+        for splat in splats:
+            scales.extend([splat.scale.X, splat.scale.Y, splat.scale.Z])
+        scale_stats = {
+            "min": np.min(scales),
+            "max": np.max(scales),
+            "mean": np.mean(scales),
+            "median": np.median(scales),
+        }
+
+        analysis = {
+            "mesh_extents": {"x": x_extent, "y": y_extent, "z": z_extent},
+            "diagonal_length": diagonal,
+            "centroid": {"x": centroid.X, "y": centroid.Y, "z": centroid.Z},
+            "expected_extents": {
+                "x": expected_extents[0],
+                "y": expected_extents[1],
+                "z": expected_extents[2],
+            },
+            "scale_statistics": scale_stats,
+            "vertex_count": merged_mesh.Vertices.Count,
+            "face_count": merged_mesh.Faces.Count,
+        }
+
+        # Generate warnings
+        warnings = []
+
+        # Check for extreme sizes
+        if diagonal > 1000:
+            warnings.append(
+                f"⚠️ Very large mesh (diagonal: {diagonal:.1f}) - possible scale multiplier issue"
+            )
+        if diagonal < 0.01:
+            warnings.append(
+                f"⚠️ Very small mesh (diagonal: {diagonal:.6f}) - possible unit mismatch"
+            )
+
+        # Check for extreme anisotropy
+        max_extent = max(x_extent, y_extent, z_extent)
+        min_extent = min(x_extent, y_extent, z_extent)
+        if min_extent > 0 and max_extent / min_extent > 1000:
+            warnings.append(
+                f"⚠️ Extreme anisotropy (ratio: {max_extent / min_extent:.0f}) - check coordinate transform"
+            )
+
+        # Check scale reasonableness
+        if scale_stats["max"] > 10:
+            warnings.append(
+                f"⚠️ Very large scale values (max: {scale_stats['max']:.3f}) - check exp() transformation"
+            )
+        if scale_stats["min"] < 0.0001:
+            warnings.append(
+                f"⚠️ Very small scale values (min: {scale_stats['min']:.6f}) - may create degenerate geometry"
+            )
+
+        analysis["warnings"] = warnings
+        return analysis
+
+    def analyze_mesh_quality(self, merged_mesh: RG.Mesh) -> dict:
+        """Analyze mesh face quality to detect degenerate triangles.
+
+        Args:
+            merged_mesh: The merged mesh to analyze
+        Returns:
+            Dictionary with mesh quality analysis results
+        """
+        if not merged_mesh or merged_mesh.Faces.Count == 0:
+            return {"error": "Empty or invalid mesh"}
+
+        aspect_ratios = []
+        degenerate_faces = 0
+        face_areas = []
+
+        for i in range(merged_mesh.Faces.Count):
+            face = merged_mesh.Faces[i]
+
+            # Get face vertices
+            if face.IsQuad:
+                # For quads, check both triangular subdivisions
+                v1 = merged_mesh.Vertices[face.A]
+                v2 = merged_mesh.Vertices[face.B]
+                v3 = merged_mesh.Vertices[face.C]
+                v4 = merged_mesh.Vertices[face.D]
+
+                # Analyze first triangle (A,B,C)
+                edges1 = [v1.DistanceTo(v2), v2.DistanceTo(v3), v3.DistanceTo(v1)]
+                if min(edges1) > 0:
+                    aspect_ratios.append(max(edges1) / min(edges1))
+                else:
+                    degenerate_faces += 1
+
+                # Analyze second triangle (A,C,D)
+                edges2 = [v1.DistanceTo(v3), v3.DistanceTo(v4), v4.DistanceTo(v1)]
+                if min(edges2) > 0:
+                    aspect_ratios.append(max(edges2) / min(edges2))
+                else:
+                    degenerate_faces += 1
+
+            else:
+                # Triangle face
+                v1 = merged_mesh.Vertices[face.A]
+                v2 = merged_mesh.Vertices[face.B]
+                v3 = merged_mesh.Vertices[face.C]
+
+                edges = [v1.DistanceTo(v2), v2.DistanceTo(v3), v3.DistanceTo(v1)]
+
+                if min(edges) > 0:
+                    aspect_ratios.append(max(edges) / min(edges))
+                    # Calculate triangle area using cross product
+                    edge1 = RG.Vector3d(v2 - v1)
+                    edge2 = RG.Vector3d(v3 - v1)
+                    area = 0.5 * RG.Vector3d.CrossProduct(edge1, edge2).Length
+                    face_areas.append(area)
+                else:
+                    degenerate_faces += 1
+
+        if len(aspect_ratios) == 0:
+            return {"error": "No valid faces found"}
+
+        aspect_ratios = np.array(aspect_ratios)
+        face_areas = np.array(face_areas) if face_areas else np.array([0])
+
+        # Count problematic faces
+        high_aspect_faces = np.sum(aspect_ratios > 100)
+        extreme_aspect_faces = np.sum(aspect_ratios > 1000)
+
+        analysis = {
+            "total_faces": merged_mesh.Faces.Count,
+            "analyzed_triangles": len(aspect_ratios),
+            "degenerate_faces": degenerate_faces,
+            "aspect_ratio_stats": {
+                "min": np.min(aspect_ratios),
+                "max": np.max(aspect_ratios),
+                "mean": np.mean(aspect_ratios),
+                "median": np.median(aspect_ratios),
+                "std": np.std(aspect_ratios),
+            },
+            "problematic_faces": {
+                "high_aspect_ratio": high_aspect_faces,  # > 100
+                "extreme_aspect_ratio": extreme_aspect_faces,  # > 1000
+            },
+            "face_area_stats": {
+                "min": np.min(face_areas) if len(face_areas) > 0 else 0,
+                "max": np.max(face_areas) if len(face_areas) > 0 else 0,
+                "mean": np.mean(face_areas) if len(face_areas) > 0 else 0,
+            },
+        }
+
+        # Generate warnings
+        warnings = []
+        if degenerate_faces > 0:
+            warnings.append(
+                f"⚠️ {degenerate_faces} degenerate faces detected (zero-length edges)"
+            )
+        if high_aspect_faces > len(aspect_ratios) * 0.1:
+            warnings.append(
+                f"⚠️ {high_aspect_faces} faces with aspect ratio > 100 ({high_aspect_faces / len(aspect_ratios) * 100:.1f}%)"
+            )
+        if extreme_aspect_faces > 0:
+            warnings.append(
+                f"⚠️ {extreme_aspect_faces} faces with extreme aspect ratio > 1000"
+            )
+        if analysis["aspect_ratio_stats"]["max"] > 100:
+            warnings.append(
+                f"⚠️ Maximum aspect ratio is {analysis['aspect_ratio_stats']['max']:.1f} - indicates stretched geometry"
+            )
+
+        analysis["warnings"] = warnings
+        return analysis
+
+    def validate_individual_ellipsoids(
+        self,
+        splats: List[GaussianSplat],
+        scale_multiplier: float = 2.5,
+        subdivision_level: int = 3,
+        sample_count: int = 5,
+    ) -> dict:
+        """Validate individual ellipsoid creation before merging.
+
+        Args:
+            splats: List of splats to validate
+            scale_multiplier: Scale multiplier used for ellipsoid creation
+            subdivision_level: Subdivision level for mesh detail
+            sample_count: Number of sample ellipsoids to create and analyze
+        Returns:
+            Dictionary with individual ellipsoid validation results
+        """
+        if len(splats) == 0:
+            return {"error": "No splats provided"}
+
+        # Sample a few splats for detailed analysis
+        sample_splats = splats[: min(sample_count, len(splats))]
+
+        individual_results = []
+
+        for i, splat in enumerate(sample_splats):
+            try:
+                # Create individual mesh
+                mesh = self.create_splat_mesh_in_rhino(
+                    splat, scale_multiplier, subdivision_level
+                )
+
+                # Analyze this individual mesh
+                bbox = mesh.GetBoundingBox(True)
+                extents = {
+                    "x": bbox.Max.X - bbox.Min.X,
+                    "y": bbox.Max.Y - bbox.Min.Y,
+                    "z": bbox.Max.Z - bbox.Min.Z,
+                }
+
+                # Original splat scales
+                original_scales = {
+                    "x": splat.scale.X,
+                    "y": splat.scale.Y,
+                    "z": splat.scale.Z,
+                }
+
+                # Expected scales after transformation
+                expected_scales = {
+                    "x": splat.scale.X * scale_multiplier,
+                    "y": splat.scale.Y * scale_multiplier,
+                    "z": splat.scale.Z * scale_multiplier,
+                }
+
+                # Scale verification (account for coordinate transform)
+                # Coordinate transform: X->X, Y->Z, Z->-Y
+                # So: splat.scale.X corresponds to mesh extents.x
+                #     splat.scale.Y corresponds to mesh extents.z (Y becomes Z)
+                #     splat.scale.Z corresponds to mesh extents.y (Z becomes -Y, but scale is magnitude)
+                scale_ratios = {
+                    "x": extents["x"] / (expected_scales["x"] * 2)
+                    if expected_scales["x"] > 0
+                    else 0,  # splat_X -> mesh_X
+                    "y": extents["z"] / (expected_scales["y"] * 2)
+                    if expected_scales["y"] > 0
+                    else 0,  # splat_Y -> mesh_Z
+                    "z": extents["y"] / (expected_scales["z"] * 2)
+                    if expected_scales["z"] > 0
+                    else 0,  # splat_Z -> mesh_Y (magnitude, so -Y doesn't matter)
+                }
+
+                individual_results.append(
+                    {
+                        "splat_index": i,
+                        "original_scales": original_scales,
+                        "expected_scales": expected_scales,
+                        "actual_extents": extents,
+                        "scale_ratios": scale_ratios,
+                        "vertex_count": mesh.Vertices.Count,
+                        "face_count": mesh.Faces.Count,
+                        "position": {
+                            "x": splat.position.X,
+                            "y": splat.position.Y,
+                            "z": splat.position.Z,
+                        },
+                        "valid": mesh.IsValid,
+                    }
+                )
+
+            except Exception as e:
+                individual_results.append({"splat_index": i, "error": str(e)})
+
+        # Calculate summary statistics
+        valid_results = [
+            r for r in individual_results if "error" not in r and r.get("valid", False)
+        ]
+
+        if len(valid_results) == 0:
+            return {
+                "error": "No valid individual ellipsoids created",
+                "individual_results": individual_results,
+            }
+
+        # Analyze scale consistency
+        all_ratios_x = [
+            r["scale_ratios"]["x"] for r in valid_results if r["scale_ratios"]["x"] > 0
+        ]
+        all_ratios_y = [
+            r["scale_ratios"]["y"] for r in valid_results if r["scale_ratios"]["y"] > 0
+        ]
+        all_ratios_z = [
+            r["scale_ratios"]["z"] for r in valid_results if r["scale_ratios"]["z"] > 0
+        ]
+
+        summary = {
+            "sample_count": len(sample_splats),
+            "valid_count": len(valid_results),
+            "failed_count": len(sample_splats) - len(valid_results),
+            "individual_results": individual_results,
+            "scale_ratio_consistency": {
+                "x_axis": {"mean": np.mean(all_ratios_x), "std": np.std(all_ratios_x)}
+                if all_ratios_x
+                else {"mean": 0, "std": 0},
+                "y_axis": {"mean": np.mean(all_ratios_y), "std": np.std(all_ratios_y)}
+                if all_ratios_y
+                else {"mean": 0, "std": 0},
+                "z_axis": {"mean": np.mean(all_ratios_z), "std": np.std(all_ratios_z)}
+                if all_ratios_z
+                else {"mean": 0, "std": 0},
+            },
+        }
+
+        # Generate warnings
+        warnings = []
+        if summary["failed_count"] > 0:
+            warnings.append(
+                f"⚠️ {summary['failed_count']} individual ellipsoids failed to create"
+            )
+
+        # Check scale consistency (should be close to 1.0)
+        for axis, stats in summary["scale_ratio_consistency"].items():
+            if abs(stats["mean"] - 1.0) > 0.2:
+                warnings.append(
+                    f"⚠️ {axis}-axis scale ratio mean is {stats['mean']:.2f} (expected ~1.0)"
+                )
+            if stats["std"] > 0.5:
+                warnings.append(
+                    f"⚠️ {axis}-axis scale ratio has high variance (std: {stats['std']:.2f})"
+                )
+
+        summary["warnings"] = warnings
+        return summary
 
     def create_splat_geometry(
         self,
@@ -916,6 +1403,7 @@ class GaussianSplatReader:
         vector_offset: RG.Vector3d = RG.Vector3d(0, 0, 0),
         scale_multiplier: float = 2.5,
         subdivision_level: int = 3,
+        debug: bool = False,
     ) -> Tuple[List[RG.GeometryBase], List[SD.Color]]:
         """Render a list of Gaussian splats in Rhino using the specified render mode.
 
@@ -949,7 +1437,7 @@ class GaussianSplatReader:
 
         elif render_mode == "merged":
             merged_mesh = self.create_merged_mesh(
-                transformed_splats, scale_multiplier, subdivision_level
+                transformed_splats, scale_multiplier, subdivision_level, debug
             )
             return [
                 merged_mesh
@@ -1067,9 +1555,13 @@ class GaussianSplatReader:
             # FIX 2: Normalize quaternion rotation values
             # Quaternions must have unit length (norm = 1.0) for valid rotations
             # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
+            # Use standard quaternion component order: [rot_0, rot_1, rot_2, rot_3] = [x, y, z, w]
+            # quat_raw = np.array(
+            #     (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
+            # )            quat_raw = np.array((v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"]))  # Reorder to [w,x,y,z]
             quat_raw = np.array(
-                (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
-            )
+                (v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"])
+            )  # Reorder to [w,x,y,z]
             quat_norm = np.linalg.norm(quat_raw)
             quat_normalized = quat_raw if quat_norm <= 0 else quat_raw / quat_norm
 
@@ -1095,25 +1587,6 @@ class GaussianSplatReader:
             )
 
         print(f"Loaded {len(splats)} Gaussian splats from {file_path}")
-
-        # DEBUG: Print scale value statistics
-        scale_log_array = np.array(scale_values_log)
-        scale_real_array = np.array(scale_values_real)
-
-        print(f"\n=== SCALE VALUE ANALYSIS ===")
-        print(
-            f"Log space (original) - Min: {np.min(scale_log_array):.3f}, Max: {np.max(scale_log_array):.3f}, Mean: {np.mean(scale_log_array):.3f}"
-        )
-        print(
-            f"Real space (exp) - Min: {np.min(scale_real_array):.6f}, Max: {np.max(scale_real_array):.6f}, Mean: {np.mean(scale_real_array):.6f}"
-        )
-        print(
-            f"Extreme values (>10): {np.sum(scale_real_array > 10)} out of {len(scale_real_array)}"
-        )
-        print(
-            f"Tiny values (<0.001): {np.sum(scale_real_array < 0.001)} out of {len(scale_real_array)}"
-        )
-        print(f"================================\n")
 
         self.perf_monitor.end_timing()
         return splats
@@ -1176,6 +1649,7 @@ class GaussianSplatReader:
         subdivision_level: int,
         sample_percentage: float,
         render_mode: str = "preview",
+        debug: bool = False,
     ) -> Tuple[List[RG.GeometryBase], List[SD.Color]]:
         print("=== RunScript STARTED ===")
 
@@ -1209,6 +1683,7 @@ class GaussianSplatReader:
             # scale_multiplier=2.5,  # Apply scale multiplier to fix mesh sizes
             scale_multiplier=scale_factor,  # Apply scale multiplier to fix mesh sizes
             subdivision_level=subdivision_level,
+            debug=debug,  # Enable debug analysis for merged meshes
         )
 
         geometries = pointcloud_geometries + merged_geometries
@@ -1309,12 +1784,20 @@ class GaussianSplatReader:
 workflow_manager = GaussianSplatReader()
 
 # This variables should be set by the Grasshopper environment
+debug_mode = globals().get("debug_mode", True)  # Default to False if not provided
+file_path = globals().get("file_path", "../assets/JAPAN.ply")
+scale_factor = globals().get("scale_factor", 1)  # Default scale factor
+subdivision_level = globals().get("subdivision_level", 3)  # Default subdivision level
+sample_percentage = globals().get("sample_percentage", 1.0)  # Default to 100%
+render_mode = globals().get("render_mode", "preview")  # Default render mode
+
 results = workflow_manager.run(
     file_path=file_path,
     scale_factor=scale_factor,
     subdivision_level=subdivision_level,
     sample_percentage=sample_percentage,
     render_mode=render_mode,
+    debug=debug_mode,
 )
 
 geometries = results[0]  # Geometry output (Meshes or Breps)
