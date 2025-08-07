@@ -24,8 +24,10 @@ import plyfile
 import random
 import numpy as np
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Iterator
 from numpy.typing import NDArray
+from itertools import accumulate, chain
+from functools import reduce
 
 # Import local classes and functions
 from performance_monitor import PerformanceMonitor
@@ -59,7 +61,6 @@ def consolidate_meshes(sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]]) -> R
         # Add vertex colors
         all_vertex_colors.extend(colors)
 
-        # Add faces with adjusted indices
         for face in mesh.Faces:
             new_face = RG.MeshFace(
                 face.A + vertex_offset,
@@ -91,6 +92,19 @@ def create_single_mesh(
     splat: GaussianSplat, sphere_template: RG.Mesh
 ) -> Tuple[RG.Mesh, List[SD.Color]]:
     sphere = sphere_template.Duplicate()
+
+    # Scale the sphere based on the splat's scale
+    scale_factor = splat.scale
+
+    # print(splat.scale.X)
+    scale_transform = RG.Transform.Scale(
+        RG.Plane.WorldXY,
+        float(splat.scale.X),
+        float(splat.scale.Y),
+        float(splat.scale.Z),
+    )
+    sphere.Transform(scale_transform)
+
     transform = RG.Transform.Translation(
         RG.Vector3d(
             splat.position.X,
@@ -115,7 +129,7 @@ def create_single_mesh(
 
 def create_merged_mesh(splats: List[GaussianSplat]) -> RG.Mesh:
     # Cache a unit sphere at origin
-    unit_sphere = RG.Mesh.CreateFromSphere(RG.Sphere(RG.Point3d.Origin, 0.05), 4, 4)
+    unit_sphere = RG.Mesh.CreateFromSphere(RG.Sphere(RG.Point3d.Origin, 1), 4, 4)
 
     sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]] = [
         create_single_mesh(splat, unit_sphere) for splat in splats
@@ -125,9 +139,9 @@ def create_merged_mesh(splats: List[GaussianSplat]) -> RG.Mesh:
     return consolidate_meshes(sphere_meshes)
 
 
-
 def render_point_cloud(
-    splats: List[GaussianSplat], position_offset: Optional[RG.Vector3d] = None
+    splats: List[GaussianSplat],
+    position_offset: Optional[RG.Vector3d] = RG.Vector3d(0, 0, 0),
 ) -> RG.PointCloud:
     """
     Renders a point cloud from a list of Gaussian splats.
@@ -141,12 +155,15 @@ def render_point_cloud(
     """
     point_cloud = RG.PointCloud()
     for splat in splats:
-        # Convert the splat position to a Rhino Point3d
-
         # Apply the position offset numpy vector if provided
-        if position_offset is not None:
-            splat.position += position_offset
-        point = RG.Point3d(splat.position.X, splat.position.Z, -splat.position.Y)
+        # x = splat.position.X + position_offset
+        # y = splat.position.Y + position_offset
+        # z = splat.position.Z + position_offset
+
+        point = (
+            RG.Point3d(splat.position.X, splat.position.Z, -splat.position.Y)
+            + position_offset
+        )
 
         alpha = int(splat.opacity * 255)
         red = ColorUtils.sh_to_rgb(splat.color[0])
@@ -207,11 +224,13 @@ centroid_point, centroid_cube, centroid_color = visualize_centroid(splat_data)
 splat_data = splat_reader.sample_by_region(splat_data, centroid_point, 2)
 print(f"Loaded {len(splat_data)} Gaussian splats from {file_path}")
 
+# Center splats around the origin
+splat_data = splat_reader.normalize_splat_position_to_origin(splat_data)
 
 # Render unmodified pointcloud to visualize the original splats
 og_pointcloud = render_point_cloud(
     splat_data,
-    position_offset=RG.Vector3d(0, -5, 0),  # No offset for original point cloud
+    position_offset=RG.Vector3d(0, 0, 4),  # No offset for original point cloud
 )
 
 # Converstion pipeline
@@ -235,14 +254,7 @@ filter_config = {
 }
 splat_data = splat_reader.apply_filters(splat_data, filter_config)
 
-# 2. Center splats around the origin
-centered_splat_data = splat_reader.normalize_splat_position_to_origin(splat_data)
-# merged_mesh = render_single_mesh(centered_splat_data)
-merged_mesh = create_merged_mesh(centered_splat_data)
-print(merged_mesh)
+merged_mesh = create_merged_mesh(splat_data)
 
-
-# splat_data = splat_reader.normalize_splat_position_to_origin(splat_data)
 geometries = [og_pointcloud, merged_mesh]
 colors = [SD.Color.White, SD.Color.Black]
-print(geometries)
