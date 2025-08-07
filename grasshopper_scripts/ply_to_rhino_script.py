@@ -971,7 +971,7 @@ class WorkflowManager:
             centroid_point,
             centroid_cube,
             SD.Color.Red,
-        )  # Return cube and color for visualization
+        )
 
     # -----------------------------
     # External Functions

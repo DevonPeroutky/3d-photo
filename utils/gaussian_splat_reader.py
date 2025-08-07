@@ -10,12 +10,41 @@ import plyfile
 import random
 import numpy as np
 import math
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from numpy.typing import NDArray
 
 import Rhino.Geometry as RG
 from performance_monitor import PerformanceMonitor
 from custom_types import GaussianSplat
+
+DEFAULT_FILTER_CONFIG = {
+    "distance_centroid": {"enabled": True, "percentile": 99.0},
+    "opacity": {
+        "enabled": True,
+        "min_opacity": 0.1,
+    },  # Filter out low opacity splats
+    "color_variance": {
+        "enabled": False,
+        "min_variance": 0.004,
+    },
+    "brightness": {
+        "enabled": True,
+        "min_brightness": 0.00,
+        "max_brightness": 0.81,
+    },
+    "scale": {
+        "enabled": True,
+        "min_scale_percentile": 2.0,  # More aggressive filtering
+        "max_scale_percentile": 98.0,
+    },
+    "statistical": {"enabled": False, "k_neighbors": 20, "std_ratio": 2.0},
+    "radius": {
+        "enabled": False,
+        "radius": 0.35,
+        "min_neighbors": 5,
+    },  # This is very slow
+    "dbscan": {"enabled": False, "eps": 0.3, "min_samples": 10},
+}
 
 
 class GaussianSplatReader:
@@ -452,7 +481,11 @@ class GaussianSplatReader:
         )
         return filtered
 
-    def apply_filters(self, splats: List[GaussianSplat]) -> List[GaussianSplat]:
+    def apply_filters(
+        self,
+        splats: List[GaussianSplat],
+        filter_config: Dict[str, Any] = DEFAULT_FILTER_CONFIG,
+    ) -> List[GaussianSplat]:
         """Apply multiple filters in sequence based on configuration.
 
         Args:
@@ -462,36 +495,6 @@ class GaussianSplatReader:
             Filtered list of splats
         """
         self.perf_monitor.start_timing("Filtering operations")
-
-        # Default configuration - start with most effective filters for your use case
-        filter_config = {
-            "distance_centroid": {"enabled": True, "percentile": 99.0},
-            "opacity": {
-                "enabled": True,
-                "min_opacity": 0.1,
-            },  # Filter out low opacity splats
-            "color_variance": {
-                "enabled": False,
-                "min_variance": 0.004,
-            },
-            "brightness": {
-                "enabled": True,
-                "min_brightness": 0.00,
-                "max_brightness": 0.81,
-            },
-            "scale": {
-                "enabled": True,
-                "min_scale_percentile": 2.0,  # More aggressive filtering
-                "max_scale_percentile": 98.0,
-            },
-            "statistical": {"enabled": False, "k_neighbors": 20, "std_ratio": 2.0},
-            "radius": {
-                "enabled": False,
-                "radius": 0.35,
-                "min_neighbors": 5,
-            },  # This is very slow
-            "dbscan": {"enabled": False, "eps": 0.3, "min_samples": 10},
-        }
 
         filtered_splats = splats
         print(f"Starting with {len(filtered_splats)} splats")
@@ -610,3 +613,4 @@ class GaussianSplatReader:
             for splat in splat_data
         ]
         return splat_data
+
