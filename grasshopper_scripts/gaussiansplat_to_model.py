@@ -20,6 +20,7 @@ import Grasshopper
 import rhinoscriptsyntax as rs
 import Rhino.Geometry as RG
 import System.Drawing as SD
+from System import Array, Double, Int32, Single
 import plyfile
 import random
 import numpy as np
@@ -88,15 +89,48 @@ def consolidate_meshes(sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]]) -> R
     return merged_mesh
 
 
+def quaternion_to_rotation_transform(quat_wxyz: NDArray[np.float32]) -> RG.Transform:
+    """
+    Convert (w, x, y, z) → Rhino.Transform.
+    Falls back to Identity if the quaternion is invalid.
+    """
+    w, x, y, z = map(float, quat_wxyz)
+    print(f"Quaternion: w={w}, x={x}, y={y}, z={z}")
+    q = RG.Quaternion(w, x, y, z)
+    print(f"Quaternion: {q}")
+
+    if not q.Unitize():  # returns False if the quat had zero length
+        print(f"NOT a valid quaternion: {q}")
+        return RG.Transform.Identity
+
+    print("Valid quaternion, converting to rotation transform...")
+    rot = RG.Transform()  # prepare an empty transform
+    print(f"Empty transform: {rot}")
+    print(q.GetRotation)
+    print(q.GetRotation.Overloads)
+    success = q.GetRotation.Overloads[RG.Transform](rot)
+    # success, angle, axis = q.GetRotation.Overloads[Double, RG.Vector3d]()
+    # print(f"Success: {success}, angle: {angle}, axis: {axis}")
+
+    if not success:  # bool return; rot is filled in-place
+        print(f"Failed to get rotation from quaternion: {q}")
+        return RG.Transform.Identity
+
+    return rot
+
+    # return RG.Transform.Rotation(
+    #     angle,  # radians
+    #     axis,  # RG.Vector3d
+    #     RG.Point3d.Origin,  # pivot
+    # )
+
+
 def create_single_mesh(
     splat: GaussianSplat, sphere_template: RG.Mesh
 ) -> Tuple[RG.Mesh, List[SD.Color]]:
     sphere = sphere_template.Duplicate()
 
     # Scale the sphere based on the splat's scale
-    scale_factor = splat.scale
-
-    # print(splat.scale.X)
     scale_transform = RG.Transform.Scale(
         RG.Plane.WorldXY,
         float(splat.scale.X),
@@ -105,6 +139,17 @@ def create_single_mesh(
     )
     sphere.Transform(scale_transform)
 
+    # Rotation
+    if splat.rotation_angles is not None and len(splat.rotation_angles) == 4:
+        w, x, y, z = splat.rotation_angles
+        quaternion = RG.Quaternion(float(w), float(x), float(y), float(z))
+
+        rotation_transform = quaternion_to_rotation_transform(splat.rotation_angles)
+        print(rotation_transform)
+
+        sphere.Transform(rotation_transform)
+
+    # Apply translation
     transform = RG.Transform.Translation(
         RG.Vector3d(
             splat.position.X,
@@ -114,16 +159,16 @@ def create_single_mesh(
     )
     sphere.Transform(transform)
 
-    # Create color for this splat
+    # Color
     r = ColorUtils.sh_to_rgb(splat.color[0])
     g = ColorUtils.sh_to_rgb(splat.color[1])
     b = ColorUtils.sh_to_rgb(splat.color[2])
     alpha = int(splat.opacity * 255)
     color = SD.Color.FromArgb(alpha, r, g, b)
 
-    # Add vertex colors for all vertices of this sphere
+    # Add vertex colors
     colors = [color for i in range(sphere.Vertices.Count)]
-
+    return sphere, colors
     return sphere, colors
 
 
