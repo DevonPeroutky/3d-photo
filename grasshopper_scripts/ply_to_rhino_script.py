@@ -58,7 +58,7 @@ class WorkflowManager:
             return RG.Transform.Identity
 
         rot = RG.Transform()  # prepare an empty transform
-        ok, angle, axis = q.GetRotation.Overloads[RG.Transform](rot)
+        ok, angle, axis = q.GetRotation()
 
         if not ok:  # bool return; rot is filled in-place
             return RG.Transform.Identity

@@ -89,40 +89,186 @@ def consolidate_meshes(sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]]) -> R
     return merged_mesh
 
 
+# TODO: Remove this function with Rhino 8 SDK.
+def quaternion_to_rotation_transform_custom(
+    quat_wxyz: NDArray[np.float32],
+) -> RG.Transform:
+    """
+    Convert a quaternion (w, x, y, z) to a Rhino Transform (rotation about origin). The Mathematical Transformation
+
+    # Quaternion to Rotation Matrix Conversion
+
+        The function converts a quaternion to a 3x3 rotation matrix using this standard formula:
+
+        R = [1-2(y²+z²)   2(xy-zw)   2(xz+yw)]
+            [2(xy+zw)   1-2(x²+z²)   2(yz-xw)]
+            [2(xz-yw)   2(yz+xw)   1-2(x²+y²)]
+
+    ## How Each Matrix Element Works
+
+        Diagonal Elements (R₀₀, R₁₁, R₂₂):
+        - R.M00 = 1.0 - 2.0 * (y*y + z*z) - How much the X-axis stays along X
+        - R.M11 = 1.0 - 2.0 * (x*x + z*z) - How much the Y-axis stays along Y
+        - R.M22 = 1.0 - 2.0 * (x*x + y*y) - How much the Z-axis stays along Z
+
+        Off-diagonal Elements:
+        - Control how axes get mixed/rotated into each other
+        - R.M01 = 2.0 * (x*y - z*w) - How much X-axis contributes to Y direction
+
+    # 3D Rotation Mechanics
+
+    ## How the Transform Rotates Geometry
+
+        When you apply this transform to a 3D point P = (px, py, pz), it performs:
+
+        P_rotated = R × P
+
+        Step-by-step rotation process:
+
+        1. X-component calculation:
+        new_x = R.M00*px + R.M01*py + R.M02*pz
+                = [1-2(y²+z²)]*px + [2(xy-zw)]*py + [2(xz+yw)]*pz
+        2. Y-component calculation:
+        new_y = R.M10*px + R.M11*py + R.M12*pz
+                = [2(xy+zw)]*px + [1-2(x²+z²)]*py + [2(yz-xw)]*pz
+        3. Z-component calculation:
+        new_z = R.M20*px + R.M21*py + R.M22*pz
+                = [2(xz-yw)]*px + [2(yz+xw)]*py + [1-2(x²+y²)]*pz
+
+    ## Physical Interpretation
+
+        The rotation matrix describes how the coordinate axes transform:
+
+        - Row 0 [R.M00, R.M01, R.M02]: Where the original X-axis points after rotation
+        - Row 1 [R.M10, R.M11, R.M12]: Where the original Y-axis points after rotation
+        - Row 2 [R.M20, R.M21, R.M22]: Where the original Z-axis points after rotation
+
+    ## Quaternion Rotation Axis and Angle
+
+    A unit quaternion (w, x, y, z) represents:
+    - Rotation axis: (x, y, z) (when normalized)
+    - Rotation angle: θ = 2 * arccos(w)
+
+    The quaternion encodes rotation by half-angle formulas:
+    - w = cos(θ/2)
+    - (x, y, z) = sin(θ/2) * axis_unit_vector
+
+    ## Example Walkthrough
+
+    Let's say you have a quaternion representing 90° rotation around Z-axis:
+    - θ = 90° = π/2
+    - w = cos(π/4) = √2/2
+    - x = 0, y = 0, z = sin(π/4) = √2/2
+
+    The resulting matrix would be:
+    R = [0  -1   0]
+        [1   0   0]
+        [0   0   1]
+
+    Applying this to point (1, 0, 0):
+    - new_x = 0*1 + (-1)*0 + 0*0 = 0
+    - new_y = 1*1 + 0*0 + 0*0 = 1
+    - new_z = 0*1 + 0*0 + 1*0 = 0
+
+    Result: (1, 0, 0) → (0, 1, 0) - X-axis rotated to Y-axis, exactly what we expect for 90° Z-rotation!
+
+    Parameters
+    ----------
+    quat_wxyz : np.ndarray
+        Quaternion as (w, x, y, z). Does not need to be unit-length.
+
+    Returns
+    -------
+    Rhino.Geometry.Transform
+        4x4 transform whose 3x3 block is the rotation matrix.
+    """
+    # Input validation block:
+    # Ensures the quaternion is a valid 4-element array before processing
+    # This prevents crashes from malformed input data
+    if quat_wxyz is None or len(quat_wxyz) != 4:
+        raise ValueError("quat_wxyz must be a length-4 array: (w, x, y, z).")
+
+    # Quaternion component extraction block:
+    # Converts numpy array elements to Python floats for mathematical operations
+    # Quaternion format is (w, x, y, z) where w is the scalar (real) part
+    # and (x, y, z) form the vector (imaginary) part
+    w, x, y, z = map(float, quat_wxyz)
+
+    # Quaternion normalization block:
+    # Computes the magnitude (length) of the quaternion vector in 4D space
+    # Formula: |q| = sqrt(w² + x² + y² + z²)
+    # This is essential because only unit quaternions represent valid rotations
+    n = math.sqrt(w * w + x * x + y * y + z * z)
+
+    # Normalization safety check block:
+    # Guards against degenerate quaternions that would cause division by zero
+    # or invalid rotations. Zero-length quaternions don't represent any rotation
+    if n == 0.0 or not math.isfinite(n):
+        raise ValueError("Quaternion has zero or invalid length.")
+
+    # Unit quaternion creation block:
+    # Divides each component by the magnitude to create a unit quaternion
+    # Unit quaternions have magnitude 1 and are the only valid rotation representations
+    w, x, y, z = w / n, x / n, y / n, z / n
+
+    # Transform matrix initialization block:
+    # Creates a 4x4 identity matrix as the base for our rotation transform
+    # Identity matrix ensures translation components remain zero (pure rotation)
+    R = RG.Transform.Identity
+
+    # First row of rotation matrix (R[0,:]) - X-axis transformation:
+    # These values determine how the X-axis gets rotated in 3D space
+    # Formula derived from quaternion-to-matrix conversion mathematics
+    R.M00 = 1.0 - 2.0 * (y * y + z * z)  # X-axis X-component: 1 - 2(y² + z²)
+    R.M01 = 2.0 * (x * y - z * w)  # X-axis Y-component: 2(xy - zw)
+    R.M02 = 2.0 * (x * z + y * w)  # X-axis Z-component: 2(xz + yw)
+    R.M03 = 0.0  # X-axis translation: 0 (pure rotation)
+
+    # Second row of rotation matrix (R[1,:]) - Y-axis transformation:
+    # These values determine how the Y-axis gets rotated in 3D space
+    R.M10 = 2.0 * (x * y + z * w)  # Y-axis X-component: 2(xy + zw)
+    R.M11 = 1.0 - 2.0 * (x * x + z * z)  # Y-axis Y-component: 1 - 2(x² + z²)
+    R.M12 = 2.0 * (y * z - x * w)  # Y-axis Z-component: 2(yz - xw)
+    R.M13 = 0.0  # Y-axis translation: 0 (pure rotation)
+
+    # Third row of rotation matrix (R[2,:]) - Z-axis transformation:
+    # These values determine how the Z-axis gets rotated in 3D space
+    R.M20 = 2.0 * (x * z - y * w)  # Z-axis X-component: 2(xz - yw)
+    R.M21 = 2.0 * (y * z + x * w)  # Z-axis Y-component: 2(yz + xw)
+    R.M22 = 1.0 - 2.0 * (x * x + y * y)  # Z-axis Z-component: 1 - 2(x² + y²)
+    R.M23 = 0.0  # Z-axis translation: 0 (pure rotation)
+
+    # Fourth row of homogeneous matrix (R[3,:]) - Homogeneous coordinates:
+    # This row maintains the homogeneous coordinate system properties
+    # Required for proper 4x4 transformation matrix format in computer graphics
+    R.M30 = 0.0  # No perspective transformation in X
+    R.M31 = 0.0  # No perspective transformation in Y
+    R.M32 = 0.0  # No perspective transformation in Z
+    R.M33 = (
+        1.0  # Homogeneous coordinate scaling factor (always 1 for affine transforms)
+    )
+
+    return R
+
+
 def quaternion_to_rotation_transform(quat_wxyz: NDArray[np.float32]) -> RG.Transform:
     """
     Convert (w, x, y, z) → Rhino.Transform.
     Falls back to Identity if the quaternion is invalid.
     """
     w, x, y, z = map(float, quat_wxyz)
-    print(f"Quaternion: w={w}, x={x}, y={y}, z={z}")
     q = RG.Quaternion(w, x, y, z)
-    print(f"Quaternion: {q}")
 
     if not q.Unitize():  # returns False if the quat had zero length
-        print(f"NOT a valid quaternion: {q}")
         return RG.Transform.Identity
 
-    print("Valid quaternion, converting to rotation transform...")
-    rot = RG.Transform()  # prepare an empty transform
-    print(f"Empty transform: {rot}")
-    print(q.GetRotation)
-    print(q.GetRotation.Overloads)
-    success = q.GetRotation.Overloads[RG.Transform](rot)
-    # success, angle, axis = q.GetRotation.Overloads[Double, RG.Vector3d]()
-    # print(f"Success: {success}, angle: {angle}, axis: {axis}")
+    rot = RG.Transform()
+    success = q.GetRotation(rot)  # Pass the transform directly
 
-    if not success:  # bool return; rot is filled in-place
-        print(f"Failed to get rotation from quaternion: {q}")
+    if not success:
         return RG.Transform.Identity
 
     return rot
-
-    # return RG.Transform.Rotation(
-    #     angle,  # radians
-    #     axis,  # RG.Vector3d
-    #     RG.Point3d.Origin,  # pivot
-    # )
 
 
 def create_single_mesh(
@@ -141,10 +287,10 @@ def create_single_mesh(
 
     # Rotation
     if splat.rotation_angles is not None and len(splat.rotation_angles) == 4:
-        w, x, y, z = splat.rotation_angles
-        quaternion = RG.Quaternion(float(w), float(x), float(y), float(z))
-
-        rotation_transform = quaternion_to_rotation_transform(splat.rotation_angles)
+        rotation_transform = quaternion_to_rotation_transform_custom(
+            splat.rotation_angles
+        )
+        # rotation_transform = quaternion_to_rotation_transform(splat.rotation_angles)
         print(rotation_transform)
 
         sphere.Transform(rotation_transform)
@@ -260,7 +406,6 @@ subdivision_level = int(
 )  # Default subdivision level
 sample_percentage = globals().get("sample_percentage", 1.0)  # Default to 100%
 render_mode = globals().get("render_mode", "preview")  # Default render mode
-
 
 # Read the Gaussian splat data from the PLY file
 splat_reader = GaussianSplatReader()
