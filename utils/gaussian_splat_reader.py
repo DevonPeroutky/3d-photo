@@ -12,10 +12,11 @@ import numpy as np
 import math
 from typing import List, Tuple, Optional, Dict, Any
 from numpy.typing import NDArray
+from enum import Enum
 
 import Rhino.Geometry as RG
 from performance_monitor import PerformanceMonitor
-from custom_types import GaussianSplat
+from custom_types import GaussianSplat, QuatFormat
 
 DEFAULT_FILTER_CONFIG = {
     "distance_centroid": {"enabled": True, "percentile": 99.0},
@@ -54,7 +55,65 @@ class GaussianSplatReader:
         """Initialize the GaussianSplatReader for PLY loading and filtering operations."""
         self.perf_monitor = PerformanceMonitor()
 
-    def load_gaussian_splats(self, file_path: str) -> List[GaussianSplat]:
+    def normlize_quaternions(
+        self, vertex, format: QuatFormat, eps: float = 1e-12
+    ) -> NDArray[np.float64]:
+        """Normalize quaternion values to ensure they have unit length.
+        
+        Always returns quaternion in WXYZ format [w, x, y, z] for compatibility
+        with quaternion_to_rotation_transform_custom function.
+        
+        Args:
+            vertex: PLY vertex data containing rot_0, rot_1, rot_2, rot_3 fields
+            format: Expected input format (WXYZ or XYZW)
+            eps: Minimum norm threshold for valid quaternions
+            
+        Returns:
+            Normalized quaternion as [w, x, y, z] in WXYZ format
+        """
+        # Extract quaternion components based on input format
+        # Most PLY files store quaternions as [w, x, y, z] in rot_0, rot_1, rot_2, rot_3
+        if format == QuatFormat.WXYZ:
+            # PLY fields rot_0=w, rot_1=x, rot_2=y, rot_3=z
+            quat_raw = np.array(
+                [vertex["rot_0"], vertex["rot_1"], vertex["rot_2"], vertex["rot_3"]],
+                dtype=np.float64,
+            )
+        else:  # QuatFormat.XYZW
+            # PLY fields rot_0=x, rot_1=y, rot_2=z, rot_3=w -> reorder to [w,x,y,z]
+            quat_raw = np.array(
+                [vertex["rot_3"], vertex["rot_0"], vertex["rot_1"], vertex["rot_2"]],
+                dtype=np.float64,
+            )
+        
+        # Validate quaternion components
+        assert len(quat_raw) == 4, "Quaternion must have exactly 4 components"
+        
+        # Calculate quaternion magnitude
+        quat_norm = np.linalg.norm(quat_raw)
+        
+        # Handle degenerate quaternions
+        fallback_rotation = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)  # Identity quaternion [w,x,y,z]
+        if quat_norm <= eps:
+            return fallback_rotation
+            
+        # Normalize to unit quaternion
+        quat_normalized = quat_raw / quat_norm
+        
+        # Ensure canonical form: W component should be non-negative
+        # If W < 0, flip entire quaternion (q and -q represent same rotation)
+        w_component = quat_normalized[0]  # W is always first element in our WXYZ format
+        if w_component < 0:
+            quat_normalized = -quat_normalized
+            
+        # Final validation: ensure we're returning WXYZ format
+        assert quat_normalized.shape == (4,), "Output must be 4-element quaternion"
+        
+        return quat_normalized
+
+    def load_gaussian_splats(
+        self, file_path: str, quat_format: QuatFormat = QuatFormat.WXYZ
+    ) -> List[GaussianSplat]:
         """Read the PLY above and return a list of GaussianSplat objects.
         # 3D world coordinates
         property float x:
@@ -108,19 +167,6 @@ class GaussianSplatReader:
             )
             scale_values_real.extend([scale_real.X, scale_real.Y, scale_real.Z])
 
-            # FIX 2: Normalize quaternion rotation values
-            # Quaternions must have unit length (norm = 1.0) for valid rotations
-            # Raw quaternions from PLY may not be normalized (69% have norm ≠ 1.0)
-            # Use standard quaternion component order: [rot_0, rot_1, rot_2, rot_3] = [x, y, z, w]
-            # quat_raw = np.array(
-            #     (v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]), dtype=np.float32
-            # )            quat_raw = np.array((v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"]))  # Reorder to [w,x,y,z]
-            quat_raw = np.array(
-                (v["rot_3"], v["rot_0"], v["rot_1"], v["rot_2"])
-            )  # Reorder to [w,x,y,z]
-            quat_norm = np.linalg.norm(quat_raw)
-            quat_normalized = quat_raw if quat_norm <= 0 else quat_raw / quat_norm
-
             # FIX 3: Transform opacity from logit space to probability space
             # Opacity is stored in logit space (unbounded real numbers)
             # Convert to [0,1] probability using sigmoid function: 1/(1+exp(-x))
@@ -133,12 +179,15 @@ class GaussianSplatReader:
                 GaussianSplat(
                     position=RG.Point3d(float(v["x"]), float(v["y"]), float(v["z"])),
                     scale=scale_real,  # Now using properly transformed scales
-                    rotation_angles=quat_normalized,  # Now using normalized quaternions
+                    rotation_angles=self.normlize_quaternions(
+                        v, quat_format
+                    ),  # Now using normalized quaternions
                     color=np.array(
                         (v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]), dtype=np.float32
                     ),
                     opacity=opacity_real,  # Now using properly transformed opacity
-                    normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float32),
+                    quat_format=quat_format,
+                    normal=np.array((v["nx"], v["ny"], v["nz"]), dtype=np.float64),
                 )
             )
 
@@ -608,9 +657,9 @@ class GaussianSplatReader:
                 rotation_angles=splat.rotation_angles,
                 color=splat.color,
                 opacity=splat.opacity,
+                quat_format=splat.quat_format,
                 normal=splat.normal,
             )
             for splat in splat_data
         ]
         return splat_data
-

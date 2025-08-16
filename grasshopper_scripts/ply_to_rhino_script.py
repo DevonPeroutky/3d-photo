@@ -14,6 +14,16 @@ for utils_folder in utils_folders:
     if utils_folder not in sys.path:
         sys.path.append(utils_folder)
 
+# Reload custom modules for development (ensures changes are picked up)
+import importlib
+try:
+    # Import the reloader utility
+    from module_reloader import reload_all_custom_modules
+    # Reload all custom modules - set debug=True to see reload status
+    reload_all_custom_modules(debug=False)
+except Exception as e:
+    print(f"Module reload failed: {e}")
+
 import System
 import Rhino
 import Grasshopper
