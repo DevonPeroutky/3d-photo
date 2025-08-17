@@ -445,7 +445,7 @@ def create_single_mesh(
     color = SD.Color.FromArgb(alpha, r, g, b)
 
     # Add vertex colors
-    colors = [color for i in range(sphere.Vertices.Count)]
+    colors = [color for _ in range(sphere.Vertices.Count)]
     return sphere, colors
 
 
