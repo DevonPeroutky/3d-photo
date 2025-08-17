@@ -261,6 +261,45 @@ def quaternion_to_rotation_transform_custom(
     return R
 
 
+def transform_quaternion_coordinate_system(
+    quat_wxyz: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """
+    Transform quaternion from PLY coordinate system to Rhino coordinate system.
+
+    Applies the same coordinate mapping used for positions: (X,Y,Z) → (X,Z,-Y)
+    This ensures rotations are consistent with transformed positions.
+
+    PLY coordinates: Y-up, X-right, Z-forward
+    Rhino coordinates: Z-up, X-right, Y-forward
+
+    Parameters
+    ----------
+    quat_wxyz : NDArray[np.float64]
+        Input quaternion in WXYZ format [w, x, y, z] in PLY coordinate system
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Transformed quaternion in WXYZ format [w, x, y, z] in Rhino coordinate system
+    """
+    # Convert to numpy array for mathematical operations
+    q = np.asarray(quat_wxyz, dtype=np.float64)
+    assert q.size == 4, "Quaternion must be 4-element array (w, x, y, z)"
+
+    w, x, y, z = q
+
+    # Apply coordinate system transformation: (X,Y,Z) → (X,Z,-Y)
+    # For quaternions, this means:
+    # - X component stays the same (rotation around X-axis)
+    # - Y component becomes -Z component (PLY Y-up becomes Rhino -Z)
+    # - Z component becomes Y component (PLY Z-forward becomes Rhino Y-forward)
+    # - W component (scalar) stays the same
+    transformed_quat = np.array([w, x, -z, y], dtype=np.float64)
+
+    return transformed_quat
+
+
 def quaternion_to_rotation_transform(quat_wxyz: NDArray[np.float64]) -> RG.Transform:
     """
     Convert (w, x, y, z) → Rhino.Transform.
@@ -359,20 +398,33 @@ def create_single_mesh(
 ) -> Tuple[RG.Mesh, List[SD.Color]]:
     sphere = sphere_template.Duplicate()
 
-    # Scale the sphere based on the splat's scale
+    # Create scale transform with base multiplier for visibility
+    # Base multiplier of 15.0 ensures Gaussian splats are properly visible
+    # since original scale values are very small (0.02-0.35 range)
+    BASE_SCALE_MULTIPLIER = 15.0
     sx, sy, sz = [
-        # math.exp(float(v)) * k for v in (splat.scale.X, splat.scale.Y, splat.scale.Z)
-        v * scale_factor
+        v * BASE_SCALE_MULTIPLIER * scale_factor
         for v in (splat.scale.X, splat.scale.Y, splat.scale.Z)
     ]
     scale_transform = RG.Transform.Scale(RG.Plane.WorldXY, sx, sy, sz)
-    sphere.Transform(scale_transform)
 
-    # Rotation
+    # Create rotation transform with coordinate system conversion
     assert splat.rotation_angles is not None and len(splat.rotation_angles) == 4, (
         "Rotation angles must be provided as a 4-element array."
     )
-    sphere.Transform(quaternion_to_rotation_transform_custom(splat.rotation_angles))
+
+    # Transform quaternion from PLY coordinate system to Rhino coordinate system
+    # This ensures rotations are consistent with the position coordinate mapping (X,Z,-Y)
+    rotation_transform = quaternion_to_rotation_transform_custom(
+        transform_quaternion_coordinate_system(splat.rotation_angles)
+    )
+
+    # Combine scale and rotation transforms using proper matrix multiplication
+    # This creates the mathematically correct Gaussian ellipsoid representation
+    # where the scale axes are oriented according to the rotation matrix
+    # Formula: Combined = Rotation × Scale (matrix multiplication order matters)
+    combined_transform = rotation_transform * scale_transform
+    sphere.Transform(combined_transform)
 
     # Move mesh to final position
     sphere.Transform(
@@ -401,9 +453,13 @@ def create_merged_mesh(
     splats: List[GaussianSplat],
     position_offset: Optional[RG.Vector3d] = RG.Vector3d(0, 0, 0),
     scale_factor: float = 1.0,
+    sphere_resolution: int = 8,
 ) -> RG.Mesh:
-    # Cache a unit sphere at origin
-    unit_sphere = RG.Mesh.CreateFromSphere(RG.Sphere(RG.Point3d.Origin, 1), 4, 4)
+    # Cache a unit sphere at origin with configurable resolution
+    # Higher resolution = smoother spheres but slower performance
+    unit_sphere = RG.Mesh.CreateFromSphere(
+        RG.Sphere(RG.Point3d.Origin, 1), sphere_resolution, sphere_resolution
+    )
 
     sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]] = [
         create_single_mesh(splat, unit_sphere, scale_factor=scale_factor)
@@ -507,7 +563,7 @@ splat_data = splat_reader.normalize_splat_position_to_origin(splat_data)
 # Render unmodified pointcloud to visualize the original splats
 og_pointcloud = render_point_cloud(
     splat_data,
-    position_offset=RG.Vector3d(0, 0, 4),  # No offset for original point cloud
+    position_offset=RG.Vector3d(0, 0, 6),  # No offset for original point cloud
 )
 
 # Converstion pipeline
@@ -532,25 +588,14 @@ filter_config = {
 splat_data = splat_reader.apply_filters(splat_data, filter_config)
 print(f"{splat_data[0].quat_format}: {splat_data[0].rotation_angles}")
 
-# WXYZ
-wxyz_mesh = create_merged_mesh(
-    splat_data,
-    position_offset=RG.Vector3d(0, 0, 0),  # Offset to visualize above the point cloud
-)
-
-# WXYZ
-wxyz_mesh_3 = create_merged_mesh(
-    splat_data,
-    position_offset=RG.Vector3d(0, 4, 4),  # Offset to visualize above the point cloud
-    scale_factor=3,
-)
-
-# WXYZ
-wxyz_mesh_2 = create_merged_mesh(
-    splat_data,
-    position_offset=RG.Vector3d(0, 4, 0),  # Offset to visualize above the point cloud
-    scale_factor=2,
-)
-
-geometries = [og_pointcloud, wxyz_mesh, wxyz_mesh_2, wxyz_mesh_3]
+geometries = [
+    og_pointcloud,
+    create_merged_mesh(splat_data),
+    create_merged_mesh(
+        splat_data, RG.Vector3d(0, 6, 6), scale_factor=1.5, sphere_resolution=8
+    ),
+    # create_merged_mesh(
+    #     splat_data, RG.Vector3d(0, 6, 0), scale_factor=1.2, sphere_resolution=8
+    # ),
+]
 colors = [SD.Color.White, SD.Color.Black, SD.Color.Blue, SD.Color.Red]
