@@ -321,25 +321,31 @@ def create_merged_mesh(
 
     # Process each splat without duplication
     for splat in splats:
-        # Create scale values
+        # Step 1: Apply the splat's UNIQUE non-uniform scale.
+        # Your loading function already correctly did math.exp(splat.scale).
         sx = splat.scale.X * scale_factor
         sy = splat.scale.Y * scale_factor
         sz = splat.scale.Z * scale_factor
-
-        # Scale (aka shape) transform
         scale_transform = RG.Transform.Scale(RG.Plane.WorldXY, sx, sy, sz)
 
-        # Rotation transform
+        # Step 2: Apply the splat's UNIQUE individual rotation.
+        # Use the original, untransformed quaternion data.
         rotation_transform = quaternion_to_rotation_transform_custom(
-            transform_quaternion_coordinate_system(splat.rotation_angles)
+            # transform_quaternion_coordinate_system(splat.rotation_angles)
+            splat.rotation_angles
         )
 
-        # Combine transforms
+        # Step 3: Combine scale and rotation. This orients the ellipsoid correctly.
         combined_transform = rotation_transform * scale_transform
 
-        # Translation
+        # BAD Translation
+        # translation = RG.Transform.Translation(
+        #     RG.Vector3d(splat.position.X, splat.position.Z, -splat.position.Y)
+        # )
+
+        # Step 4: Translate the ellipsoid to its final position in the original coordinate system.
         translation = RG.Transform.Translation(
-            RG.Vector3d(splat.position.X, splat.position.Z, -splat.position.Y)
+            RG.Vector3d(splat.position.X, splat.position.Y, splat.position.Z)
         )
 
         # Final transform
@@ -373,6 +379,15 @@ def create_merged_mesh(
             all_colors.append(color)
 
         vertex_offset += base_vertex_count
+
+    # Step 5: Apply the ONE-TIME coordinate system rotation to the ENTIRE assembled mesh.
+    # This correctly moves the model from a Y-up to Z-up (Rhino) system.
+    y_up_to_z_up_transform = RG.Transform.Rotation(
+        math.pi / 2,  # 90 degrees
+        RG.Vector3d.XAxis,
+        RG.Point3d.Origin,
+    )
+    final_mesh.Transform(y_up_to_z_up_transform)
 
     # Set all colors at once
     final_mesh.VertexColors.SetColors(all_colors)
