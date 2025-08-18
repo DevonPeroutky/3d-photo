@@ -49,58 +49,6 @@ from color_utils import ColorUtils
 from gaussian_splat_reader import GaussianSplatReader
 
 
-def consolidate_meshes(sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]]) -> RG.Mesh:
-    """
-    Consolidates a list of meshes and their corresponding vertex colors into a single
-    merged mesh.
-
-    Args:
-        sphere_meshes: A list of tuples, where each tuple contains a Rhino.Geometry.Mesh
-                       and a list of System.Drawing.Color objects for its vertices.
-
-    Returns:
-        A single, merged Rhino.Geometry.Mesh with all the geometry and vertex colors
-        of the input meshes.
-    """
-    all_vertices = []
-    all_faces = []
-    all_vertex_colors = []
-    vertex_offset = 0
-
-    for mesh, colors in sphere_meshes:
-        # Add vertices
-        all_vertices.extend(mesh.Vertices)
-
-        # Add vertex colors
-        all_vertex_colors.extend(colors)
-
-        for face in mesh.Faces:
-            new_face = RG.MeshFace(
-                face.A + vertex_offset,
-                face.B + vertex_offset,
-                face.C + vertex_offset,
-                face.D + vertex_offset if face.IsQuad else face.C + vertex_offset,
-            )
-            all_faces.append(new_face)
-
-        # Update the vertex offset for the next mesh
-        vertex_offset += mesh.Vertices.Count
-
-    # Create the final merged mesh
-    merged_mesh = RG.Mesh()
-    merged_mesh.Vertices.AddVertices(all_vertices)
-    merged_mesh.Faces.AddFaces(all_faces)
-    merged_mesh.VertexColors.SetColors(all_vertex_colors)
-
-    # Perform final cleanup
-    merged_mesh.Normals.ComputeNormals()
-    merged_mesh.Compact()
-    merged_mesh.UnifyNormals()
-    merged_mesh.RebuildNormals()
-
-    return merged_mesh
-
-
 # TODO: Remove this function with Rhino 8 SDK.
 def quaternion_to_rotation_transform_custom(
     quat_wxyz: NDArray[np.float64],
@@ -346,131 +294,97 @@ def quaternion_to_rotation_transform_rhino(quat_wxyz):
         )
 
 
-# From gpt5
-# def create_single_mesh(
-#     splat: GaussianSplat, sphere_template: RG.Mesh
-# ) -> Tuple[RG.Mesh, List[SD.Color]]:
-#     sphere = sphere_template.Duplicate()
-#
-#     # --- SCALE: log-scales → σ and enlarge to visual extent ---
-#     k = 1.0
-#     sx, sy, sz = [
-#         math.exp(float(v)) * k for v in (splat.scale.X, splat.scale.Y, splat.scale.Z)
-#     ]
-#     sphere.Transform(RG.Transform.Scale(RG.Plane.WorldXY, sx, sy, sz))
-#
-#     # --- ROTATE in NeRF basis ---
-#     q = np.asarray(splat.rotation_angles, float)
-#     if abs(q[0]) <= 0.5 and abs(q[3]) >= 0.5:  # xyzw → wxyz if needed
-#         q = q[[3, 0, 1, 2]]
-#     rot = quaternion_to_rotation_transform_custom(q)
-#     sphere.Transform(rot)
-#
-#     # --- CHANGE OF BASIS: NeRF (x,y,z) → Rhino (x,z,-y) ---
-#     basis = RG.Transform.Identity
-#     basis.M00 = 1
-#     basis.M01 = 0
-#     basis.M02 = 0
-#     basis.M10 = 0
-#     basis.M11 = 0
-#     basis.M12 = 1
-#     basis.M20 = 0
-#     basis.M21 = -1
-#     basis.M22 = 0
-#     sphere.Transform(basis)
-#
-#     # --- TRANSLATE (already converted coords) ---
-#     # sphere.Transform(
-#     #     RG.Transform.Translation(splat.position.X, splat.position.Z, -splat.position.Y)
-#     # )
-#
-#     # --- COLOR (DC term only; no view-dependence) ---
-#     r = ColorUtils.sh_to_rgb(splat.color[0])
-#     g = ColorUtils.sh_to_rgb(splat.color[1])
-#     b = ColorUtils.sh_to_rgb(splat.color[2])
-#     color = SD.Color.FromArgb(255, r, g, b)  # alpha ignored for display anyway
-#     colors = [color] * sphere.Vertices.Count
-#     return sphere, colors
-
-
-def create_single_mesh(
-    splat: GaussianSplat, sphere_template: RG.Mesh, scale_factor: float = 1.0
-) -> Tuple[RG.Mesh, List[SD.Color]]:
-    sphere = sphere_template.Duplicate()
-
-    # Create scale transform with base multiplier for visibility
-    # Base multiplier of 15.0 ensures Gaussian splats are properly visible
-    # since original scale values are very small (0.02-0.35 range)
-    BASE_SCALE_MULTIPLIER = 15.0
-    sx, sy, sz = [
-        v * BASE_SCALE_MULTIPLIER * scale_factor
-        for v in (splat.scale.X, splat.scale.Y, splat.scale.Z)
-    ]
-    scale_transform = RG.Transform.Scale(RG.Plane.WorldXY, sx, sy, sz)
-
-    # Create rotation transform with coordinate system conversion
-    assert splat.rotation_angles is not None and len(splat.rotation_angles) == 4, (
-        "Rotation angles must be provided as a 4-element array."
-    )
-
-    # Transform quaternion from PLY coordinate system to Rhino coordinate system
-    # This ensures rotations are consistent with the position coordinate mapping (X,Z,-Y)
-    rotation_transform = quaternion_to_rotation_transform_custom(
-        transform_quaternion_coordinate_system(splat.rotation_angles)
-    )
-
-    # Combine scale and rotation transforms using proper matrix multiplication
-    # This creates the mathematically correct Gaussian ellipsoid representation
-    # where the scale axes are oriented according to the rotation matrix
-    # Formula: Combined = Rotation × Scale (matrix multiplication order matters)
-    combined_transform = rotation_transform * scale_transform
-    sphere.Transform(combined_transform)
-
-    # Move mesh to final position
-    sphere.Transform(
-        RG.Transform.Translation(
-            RG.Vector3d(
-                splat.position.X,
-                splat.position.Z,
-                -splat.position.Y,
-            )
-        )
-    )
-
-    # Color
-    r = ColorUtils.sh_to_rgb(splat.color[0])
-    g = ColorUtils.sh_to_rgb(splat.color[1])
-    b = ColorUtils.sh_to_rgb(splat.color[2])
-    alpha = int(splat.opacity * 255)
-    color = SD.Color.FromArgb(alpha, r, g, b)
-
-    # Add vertex colors
-    colors = [color for _ in range(sphere.Vertices.Count)]
-    return sphere, colors
-
-
 def create_merged_mesh(
     splats: List[GaussianSplat],
     position_offset: Optional[RG.Vector3d] = RG.Vector3d(0, 0, 0),
     scale_factor: float = 1.0,
     sphere_resolution: int = 8,
 ) -> RG.Mesh:
-    # Cache a unit sphere at origin with configurable resolution
-    # Higher resolution = smoother spheres but slower performance
-    unit_sphere = RG.Mesh.CreateFromSphere(
+    """
+    Optimized version that avoids mesh duplication for each splat.
+    Transforms vertices directly for much better performance.
+    """
+    # Create base sphere only once
+    base_sphere = RG.Mesh.CreateFromSphere(
         RG.Sphere(RG.Point3d.Origin, 1), sphere_resolution, sphere_resolution
     )
 
-    sphere_meshes: List[Tuple[RG.Mesh, List[SD.Color]]] = [
-        create_single_mesh(splat, unit_sphere, scale_factor=scale_factor)
-        for splat in splats
-    ]
+    # Extract base sphere data once
+    base_vertices = [v for v in base_sphere.Vertices]
+    base_vertex_count = len(base_vertices)
+    base_faces = [f for f in base_sphere.Faces]
 
-    # Consolidate all meshes and their vertex colors into a single mesh
-    mesh = consolidate_meshes(sphere_meshes)
-    mesh.Transform(RG.Transform.Translation(position_offset))
+    # Initialize final mesh
+    final_mesh = RG.Mesh()
+    all_colors = []
+    vertex_offset = 0
 
-    return mesh
+    # Process each splat without duplication
+    for splat in splats:
+        # Create scale values
+        sx = splat.scale.X * scale_factor
+        sy = splat.scale.Y * scale_factor
+        sz = splat.scale.Z * scale_factor
+
+        # Scale (aka shape) transform
+        scale_transform = RG.Transform.Scale(RG.Plane.WorldXY, sx, sy, sz)
+
+        # Rotation transform
+        rotation_transform = quaternion_to_rotation_transform_custom(
+            transform_quaternion_coordinate_system(splat.rotation_angles)
+        )
+
+        # Combine transforms
+        combined_transform = rotation_transform * scale_transform
+
+        # Translation
+        translation = RG.Transform.Translation(
+            RG.Vector3d(splat.position.X, splat.position.Z, -splat.position.Y)
+        )
+
+        # Final transform
+        final_transform = translation * combined_transform
+
+        # Transform and add vertices directly
+        for vertex in base_vertices:
+            pt = RG.Point3d(vertex.X, vertex.Y, vertex.Z)
+            pt.Transform(final_transform)
+            final_mesh.Vertices.Add(pt)
+
+        # Add faces with correct vertex offsets
+        for face in base_faces:
+            new_face = RG.MeshFace(
+                face.A + vertex_offset,
+                face.B + vertex_offset,
+                face.C + vertex_offset,
+                face.D + vertex_offset if face.IsQuad else face.C + vertex_offset,
+            )
+            final_mesh.Faces.AddFace(new_face)
+
+        # Color
+        r = ColorUtils.sh_to_rgb(splat.color[0])
+        g = ColorUtils.sh_to_rgb(splat.color[1])
+        b = ColorUtils.sh_to_rgb(splat.color[2])
+        alpha = int(splat.opacity * 255)
+        color = SD.Color.FromArgb(alpha, r, g, b)
+
+        # Add colors for this splat's vertices
+        for _ in range(base_vertex_count):
+            all_colors.append(color)
+
+        vertex_offset += base_vertex_count
+
+    # Set all colors at once
+    final_mesh.VertexColors.SetColors(all_colors)
+
+    # Apply position offset
+    final_mesh.Transform(RG.Transform.Translation(position_offset))
+
+    # Final cleanup
+    final_mesh.Normals.ComputeNormals()
+    final_mesh.Compact()
+
+    return final_mesh
 
 
 def render_point_cloud(
@@ -517,7 +431,6 @@ def render_point_cloud(
 
 
 def visualize_centroid(splat_data: List[GaussianSplat]) -> RG.Brep:
-    # Calculate centroid
     splat_data_centroid = np.mean(
         [
             [splat.position.X, splat.position.Y, splat.position.Z]
@@ -544,9 +457,7 @@ def visualize_centroid(splat_data: List[GaussianSplat]) -> RG.Brep:
 debug_mode = globals().get("debug_mode", True)  # Default to False if not provided
 file_path = globals().get("file_path", "../assets/JAPAN.ply")
 scale_factor = globals().get("scale_factor", 1)  # Default scale factor
-subdivision_level = int(
-    globals().get("subdivision_level", 3)
-)  # Default subdivision level
+subdivision_level = int(globals().get("subdivision_level", 3))
 sample_percentage = globals().get("sample_percentage", 1.0)  # Default to 100%
 render_mode = globals().get("render_mode", "preview")  # Default render mode
 
@@ -554,7 +465,7 @@ render_mode = globals().get("render_mode", "preview")  # Default render mode
 splat_reader = GaussianSplatReader()
 splat_data = splat_reader.load_gaussian_splats(file_path, quat_format=QuatFormat.WXYZ)
 centroid_point, centroid_cube, centroid_color = visualize_centroid(splat_data)
-splat_data = splat_reader.sample_by_region(splat_data, centroid_point, 2)
+# splat_data = splat_reader.sample_by_region(splat_data, centroid_point, 2)
 print(f"Loaded {len(splat_data)} Gaussian splats from {file_path}")
 
 # Center splats around the origin
@@ -563,7 +474,7 @@ splat_data = splat_reader.normalize_splat_position_to_origin(splat_data)
 # Render unmodified pointcloud to visualize the original splats
 og_pointcloud = render_point_cloud(
     splat_data,
-    position_offset=RG.Vector3d(0, 0, 6),  # No offset for original point cloud
+    position_offset=RG.Vector3d(0, 0, 8),  # No offset for original point cloud
 )
 
 # Converstion pipeline
@@ -572,7 +483,7 @@ filter_config = {
     "distance_centroid": {"enabled": True, "percentile": 99.0},
     "opacity": {
         "enabled": True,
-        "min_opacity": 0.1,
+        "min_opacity": 0.5,
     },  # Filter out low opacity splats
     "brightness": {
         "enabled": True,
@@ -590,12 +501,6 @@ print(f"{splat_data[0].quat_format}: {splat_data[0].rotation_angles}")
 
 geometries = [
     og_pointcloud,
-    create_merged_mesh(splat_data),
-    create_merged_mesh(
-        splat_data, RG.Vector3d(0, 6, 6), scale_factor=1.5, sphere_resolution=8
-    ),
-    # create_merged_mesh(
-    #     splat_data, RG.Vector3d(0, 6, 0), scale_factor=1.2, sphere_resolution=8
-    # ),
+    create_merged_mesh(splat_data, scale_factor=2, sphere_resolution=6),
 ]
-colors = [SD.Color.White, SD.Color.Black, SD.Color.Blue, SD.Color.Red]
+colors = [SD.Color.White, SD.Color.Black]
