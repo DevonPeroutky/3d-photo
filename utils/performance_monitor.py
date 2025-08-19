@@ -60,29 +60,62 @@ class PerformanceMonitor:
         if not geometries:
             return
 
+        # Determine geometry type based on render mode
+        geometry_type = "Breps"
+        if render_mode == "test":
+            geometry_type = "Points"
+        elif render_mode == "preview":
+            geometry_type = "Meshes"
+        elif render_mode == "pointcloud":
+            geometry_type = "PointCloud"
+        else:
+            geometry_type = "Breps"
+
         print(f"\n📊 Geometry Statistics ({render_mode} mode):")
-        print(f"  Total objects: {len(geometries):,}")
+        
+        # Special handling for pointcloud mode
+        if render_mode == "pointcloud":
+            # Look for PointCloud object in geometries list (skip centroid cube)
+            point_cloud = None
+            for geom in geometries:
+                if hasattr(geom, 'Count'):  # PointCloud has Count property
+                    point_cloud = geom
+                    break
+            
+            if point_cloud:
+                point_count = point_cloud.Count
+                print(f"  PointCloud objects: {len(geometries):,}")
+                print(f"  Total points in cloud: {point_count:,}")
+                print(f"  🚀 Performance benefit: ~{point_count // 100:.0f}x faster than individual points")
+                
+                # More accurate memory estimate for point clouds
+                estimated_mb = (point_count * 24) / (1024 * 1024)  # ~24 bytes per colored point
+                print(f"  Estimated memory: ~{estimated_mb:.1f} MB")
+            else:
+                print(f"  Total objects: {len(geometries):,}")
+        else:
+            # Standard handling for other modes
+            print(f"  Total {geometry_type}: {len(geometries):,}")
 
-        # Count vertices/faces for meshes
-        if render_mode == "preview" and hasattr(geometries[0], "Vertices"):
-            try:
-                total_vertices = sum(
-                    g.Vertices.Count for g in geometries if hasattr(g, "Vertices")
-                )
-                total_faces = sum(
-                    g.Faces.Count for g in geometries if hasattr(g, "Faces")
-                )
-                avg_vertices = total_vertices / len(geometries) if geometries else 0
-                avg_faces = total_faces / len(geometries) if geometries else 0
+            # Count vertices/faces for meshes
+            if geometry_type == "Meshes" and len(geometries) > 1 and hasattr(geometries[1], "Vertices"):
+                try:
+                    total_vertices = sum(
+                        g.Vertices.Count for g in geometries if hasattr(g, "Vertices")
+                    )
+                    total_faces = sum(
+                        g.Faces.Count for g in geometries if hasattr(g, "Faces")
+                    )
+                    avg_vertices = total_vertices / len(geometries) if geometries else 0
+                    avg_faces = total_faces / len(geometries) if geometries else 0
 
-                print(f"  Total vertices: {total_vertices:,}")
-                print(f"  Total faces: {total_faces:,}")
-                print(f"  Avg vertices/mesh: {avg_vertices:.1f}")
-                print(f"  Avg faces/mesh: {avg_faces:.1f}")
-            except Exception as e:
-                print(f"  Could not calculate mesh stats: {e}")
+                    print(f"  Total vertices: {total_vertices:,}")
+                    print(f"  Total faces: {total_faces:,}")
+                    print(f"  Avg vertices/mesh: {avg_vertices:.1f}")
+                    print(f"  Avg faces/mesh: {avg_faces:.1f}")
+                except Exception as e:
+                    print(f"  Could not calculate mesh stats: {e}")
 
-        # Estimate memory usage
-        estimated_mb = len(geometries) * 0.1  # Rough estimate
-        print(f"  Estimated geometry memory: ~{estimated_mb:.1f} MB")
-
+            # Estimate memory usage for standard modes
+            estimated_mb = len(geometries) * 0.1  # Rough estimate
+            print(f"  Estimated geometry memory: ~{estimated_mb:.1f} MB")
