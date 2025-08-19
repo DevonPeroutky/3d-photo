@@ -240,10 +240,10 @@ def transform_quaternion_coordinate_system(
     # Apply coordinate system transformation: (X,Y,Z) → (X,Z,-Y)
     # For quaternions, this means:
     # - X component stays the same (rotation around X-axis)
-    # - Y component becomes -Z component (PLY Y-up becomes Rhino -Z)
-    # - Z component becomes Y component (PLY Z-forward becomes Rhino Y-forward)
+    # - Y component becomes Z component (PLY Y-up becomes Rhino Z-up)
+    # - Z component becomes -Y component (PLY Z-forward becomes Rhino -Y)
     # - W component (scalar) stays the same
-    transformed_quat = np.array([w, x, -z, y], dtype=np.float64)
+    transformed_quat = np.array([w, x, z, -y], dtype=np.float64)
 
     return transformed_quat
 
@@ -383,7 +383,7 @@ def create_merged_mesh(
     # Step 5: Apply the ONE-TIME coordinate system rotation to the ENTIRE assembled mesh.
     # This correctly moves the model from a Y-up to Z-up (Rhino) system.
     y_up_to_z_up_transform = RG.Transform.Rotation(
-        math.pi / 2,  # 90 degrees
+        -math.pi / 2,  # -90 degrees (negative rotation to avoid flipping)
         RG.Vector3d.XAxis,
         RG.Point3d.Origin,
     )
